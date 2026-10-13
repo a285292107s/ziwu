@@ -1,0 +1,491 @@
+<script setup lang="ts">
+import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { paletteFor, phaseForHour } from '~/logic/ambience'
+import { useShortcuts } from '~/composables/useShortcuts'
+import { useTheme } from '~/composables/useTheme'
+import { PRESET_SITES } from '~/logic/presetSites'
+import { greeting, presetSitesMerged, presetSitesMergedReady, shortcutsReady } from '~/logic/storage'
+
+const { isDark, setTheme } = useTheme()
+const { importSites } = useShortcuts()
+
+/* ---------------- 时钟 ----------------
+   钟点与分钟是主角，秒单独降级成一个小号数字：
+   每秒刷新的元素越少、字号越小，视线就越不会被秒针拽走，
+   同时仍然是「活着的」时钟而不是一张静态图。 */
+const now = ref(new Date())
+const timer = window.setInterval(() => {
+  now.value = new Date()
+}, 1000)
+onUnmounted(() => window.clearInterval(timer))
+
+const pad = (n: number) => String(n).padStart(2, '0')
+
+const clockMain = computed(() => `${pad(now.value.getHours())}:${pad(now.value.getMinutes())}`)
+const clockSeconds = computed(() => pad(now.value.getSeconds()))
+const date = computed(() =>
+  now.value.toLocaleDateString('zh-CN', {
+    month: 'long',
+    day: 'numeric',
+    weekday: 'long',
+  }),
+)
+
+/* ---------------- 随时间变化的氛围背景 ---------------- */
+const phase = computed(() => phaseForHour(now.value.getHours()))
+const palette = computed(() => paletteFor(phase.value, isDark.value))
+
+const backdropStyle = computed(() => ({
+  '--amb-from': palette.value.from,
+  '--amb-to': palette.value.to,
+  '--amb-glow': palette.value.glow,
+}))
+
+/* ---------------- 问候语就地编辑 ---------------- */
+const editingGreeting = ref(false)
+
+function openOptionsPage() {
+  browser.runtime.openOptionsPage()
+}
+
+/* ---------------- 一次性并入 iTab 预置站点 ----------------
+   `defaultShortcuts()` 只在 storage 里没有 `meridiem-shortcuts` 时生效，
+   已经在用的实例读不到新预置站点。这里做一次合并：用户原有的磁贴留在原位，
+   只把网址还没出现过的补到末尾。
+
+   两个 ready 都必须等。`importSites` 是拿「当前列表」去重的，
+   在 `shortcutsReady` 落地前列表还是空的，已有站点会被当成新站点再插一遍。
+   `presetSitesMerged` 保证只跑一次，之后用户删掉的不会被复活。 */
+onMounted(async () => {
+  await Promise.all([shortcutsReady, presetSitesMergedReady])
+  if (presetSitesMerged.value)
+    return
+
+  importSites(PRESET_SITES)
+  presetSitesMerged.value = true
+})
+</script>
+
+<template>
+  <main
+    class="newtab-root"
+    :style="backdropStyle"
+    :data-phase="phase"
+  >
+    <!-- 氛围层：底色渐变 + 两团柔光 + 暗角。纯装饰，不承载任何信息 -->
+    <div class="ambience" aria-hidden="true">
+      <div class="ambience__glow ambience__glow--top" />
+      <div class="ambience__glow ambience__glow--side" />
+      <div class="ambience__vignette" />
+    </div>
+
+    <!-- 胶片颗粒：给玻璃材质一个「实体表面」，避免大面积渐变显得像石膏 -->
+    <div class="grain" aria-hidden="true" />
+
+    <!-- ---------------- 页眉：品牌标记 + 全局控件 ---------------- -->
+    <header class="masthead">
+      <span class="brand">
+        <span class="brand__tick" aria-hidden="true" />
+        <span class="brand__word">Meridiem</span>
+      </span>
+
+      <div class="masthead__controls">
+        <button
+          type="button"
+          class="ghost-control focus-ring"
+          data-test="open-options"
+          @click="openOptionsPage"
+        >
+          <span class="i-carbon-settings-adjust" aria-hidden="true" />
+          设置
+        </button>
+
+        <div class="theme-switch" role="group" aria-label="主题">
+          <button
+            type="button"
+            class="theme-switch__btn focus-ring"
+            :aria-pressed="!isDark"
+            aria-label="浅色主题"
+            data-test="theme-light"
+            @click="setTheme('light')"
+          >
+            <span class="i-carbon-sun" aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            class="theme-switch__btn focus-ring"
+            :aria-pressed="isDark"
+            aria-label="深色主题"
+            data-test="theme-dark"
+            @click="setTheme('dark')"
+          >
+            <span class="i-carbon-moon" aria-hidden="true" />
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <!-- ---------------- 主体 ---------------- -->
+    <div class="shell">
+      <section class="hero">
+        <!-- 时间：这一页的视觉主角 -->
+        <div class="clock-block">
+          <h1 class="clock" data-test="clock">
+            <span class="clock__main">{{ clockMain }}</span>
+            <span class="clock__seconds" aria-hidden="true">{{ clockSeconds }}</span>
+          </h1>
+          <p class="clock-date" data-test="clock-date">
+            {{ date }}
+          </p>
+        </div>
+
+        <!-- 问候语：点一下就地改 -->
+        <div class="greeting-block">
+          <div
+            v-if="!editingGreeting"
+            class="greeting focus-ring"
+            title="点击编辑"
+            tabindex="0"
+            role="button"
+            data-test="greeting"
+            @click="editingGreeting = true"
+            @keydown.enter.prevent="editingGreeting = true"
+            @keydown.space.prevent="editingGreeting = true"
+          >
+            {{ greeting }}
+          </div>
+          <input
+            v-else
+            v-model="greeting"
+            class="greeting-input"
+            aria-label="编辑问候语"
+            data-test="greeting-input"
+            @blur="editingGreeting = false"
+            @keyup.enter="editingGreeting = false"
+          >
+        </div>
+
+        <SearchBox />
+      </section>
+
+      <div class="shortcuts-band">
+        <ShortcutGrid />
+      </div>
+    </div>
+  </main>
+</template>
+
+<style scoped>
+/* ---------------------------------------------------------------
+   外壳
+   ---------------------------------------------------------------
+   用 100dvh 而不是 100vh：移动端 Safari 地址栏收起/展开时
+   100vh 会跳，100dvh 不会。
+   --------------------------------------------------------------- */
+.newtab-root {
+  position: relative;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: linear-gradient(168deg, var(--amb-from) 0%, var(--amb-to) 58%, var(--bg-deep) 100%);
+  color: var(--text-1);
+  font-family: var(--font-sans);
+  user-select: none;
+}
+
+/* ---- 氛围层 ---- */
+.ambience {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-ambience);
+  pointer-events: none;
+}
+
+.ambience__glow {
+  position: absolute;
+  border-radius: 50%;
+  background: var(--amb-glow);
+  filter: blur(72px);
+}
+
+.ambience__glow--top {
+  width: min(64rem, 96vw);
+  height: 30rem;
+  top: -15rem;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.ambience__glow--side {
+  width: 34rem;
+  height: 26rem;
+  right: -10rem;
+  bottom: -12rem;
+  opacity: 0.7;
+}
+
+/* 暗角：把视线收向版心，同时让四周的玻璃元素有「退后」的层次 */
+.ambience__vignette {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(120% 90% at 50% 34%, transparent 42%, var(--bg-deep) 130%);
+  opacity: 0.7;
+}
+
+/* ---- 胶片颗粒 ----
+   固定定位 + pointer-events-none，只画一次、不随滚动重绘。
+   颗粒让渐变背景有实体感；缺了它，大面积模糊渐变会显得像塑料。 */
+.grain {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-grain);
+  pointer-events: none;
+  opacity: var(--grain-opacity, 0.4);
+  mix-blend-mode: soft-light;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.42'/%3E%3C/svg%3E");
+}
+
+/* ---- 页眉 ---- */
+.masthead {
+  position: relative;
+  z-index: var(--z-rail);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  width: 100%;
+  max-width: var(--shell-max);
+  margin: 0 auto;
+  padding: clamp(1.25rem, 3vh, 2.25rem) var(--gutter) 0;
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: var(--font-display);
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-1);
+}
+
+.brand__tick {
+  width: 0.85rem;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--brand-vivid);
+}
+
+.masthead__controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* 主题切换：两态都是显式的，当前状态一眼可读，
+   比单按钮「显示将要切换到的状态」更少歧义。 */
+.theme-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.1rem;
+  padding: 0.15rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.theme-switch__btn {
+  display: grid;
+  place-items: center;
+  width: 1.7rem;
+  height: 1.7rem;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-3);
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition:
+    background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.theme-switch__btn:hover {
+  color: var(--text-1);
+}
+
+.theme-switch__btn[aria-pressed='true'] {
+  background: var(--surface-strong);
+  color: var(--text-1);
+  box-shadow: var(--shadow-1);
+}
+
+/* ---- 版心 ----
+   主体垂直居中，磁贴带跟在后面而不是钉在底部：
+   内容少时整块居中，内容多时自然向下延展。 */
+.shell {
+  position: relative;
+  z-index: var(--z-content);
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: clamp(2rem, 5.5vh, 3.25rem);
+  width: 100%;
+  max-width: var(--shell-max);
+  margin: 0 auto;
+  padding: clamp(1.25rem, 3vh, 2rem) var(--gutter) clamp(1.75rem, 5vh, 3rem);
+}
+
+/* ---- 时间 ----
+   这一块是页面的「标题区」，所以内部用一条紧凑的节奏线：
+   钟点 → 日期 → 问候，间距从紧到松，最后和搜索框之间留一个大跳。 */
+.hero {
+  display: flex;
+  flex-direction: column;
+}
+
+.clock-block {
+  animation: rise-in var(--dur-enter) var(--ease-out) both;
+}
+
+.clock {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 300;
+  letter-spacing: -0.045em;
+  line-height: 0.92;
+}
+
+.clock__main {
+  font-size: clamp(3.6rem, 12.5vw, 6.4rem);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 秒：小一号、低一档、贴基线，只做很轻的呼吸。
+   字号刻意固定 1.6rem = 25.6px，踩在 WCAG「大字号」门槛（24px）之上：
+   强调色要在时刻变化的氛围底上稳住对比度，走大字号那条线比
+   把青色压到发黑更合理。用固定值而不是 clamp，是为了任何视口下
+   都不会掉回普通字号的对比度要求。 */
+.clock__seconds {
+  font-size: 1.6rem;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+  color: var(--seconds, var(--brand-vivid));
+  padding-top: 0.5em;
+  animation: tick-pulse 2s var(--ease-in-out) infinite;
+}
+
+.clock-date {
+  margin: 1rem 0 0;
+  font-size: 0.88rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--text-3);
+}
+
+/* ---- 问候语 ---- */
+.greeting-block {
+  margin-top: 0.7rem;
+  animation: rise-in var(--dur-enter) var(--ease-out) 90ms both;
+}
+
+.greeting {
+  display: inline-block;
+  max-width: 32ch;
+  padding: 0.12rem 0;
+  font-size: clamp(1rem, 1.6vw, 1.2rem);
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--text-2);
+  /* 这里是「点击进入编辑」，不是可选择文本（根节点 user-select: none），
+     所以用 pointer 而不是 text，别让光标许诺一个做不到的操作。 */
+  cursor: pointer;
+  border-radius: 6px;
+  border-bottom: 1px solid transparent;
+  transition:
+    color var(--dur-base) var(--ease-out),
+    border-color var(--dur-base) var(--ease-out);
+}
+
+.greeting:hover {
+  color: var(--text-1);
+  border-bottom-color: var(--line-strong);
+}
+
+.greeting-input {
+  min-width: 12ch;
+  max-width: 32ch;
+  padding: 0.12rem 0;
+  font-size: clamp(1rem, 1.6vw, 1.2rem);
+  font-family: inherit;
+  font-weight: 500;
+  color: var(--text-1);
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--brand-vivid);
+  outline: none;
+}
+
+/* ---- 搜索框 ----
+   入场动画挂在 .search-shell（真正的胶囊）上，不挂在 .search-root 上。
+   原因：animation ... both 会让动画结束后依然保留 transform 的「已结束」状态，
+   而带 transform 的元素会自成一格层叠上下文。.search-root 一旦被算成层叠上下文，
+   它内部 position:absolute 的引擎下拉就会被压在后面的磁贴带下面
+   （截图里能看到磁贴从菜单里透出来）。挂在没有子级浮层的 .search-shell 上就没这个问题。 */
+.hero :deep(.search-shell) {
+  animation: rise-in var(--dur-enter) var(--ease-out) 180ms both;
+}
+
+.hero :deep(.search-root) {
+  margin-top: clamp(1.85rem, 4.5vh, 2.75rem);
+}
+
+/* ---- 磁贴带 ----
+   同上：动画挂在 .grid-root，不挂在作为 flex 子项的 .shortcuts-band 上。 */
+.shortcuts-band :deep(.grid-root) {
+  animation: rise-in var(--dur-enter) var(--ease-out) 260ms both;
+}
+
+/* ---------------------------------------------------------------
+   响应式
+   ---------------------------------------------------------------
+   窄屏不保留任何非对称结构：一律单列、左对齐、缩紧节奏。
+   --------------------------------------------------------------- */
+@media (max-width: 768px) {
+  .shell {
+    justify-content: flex-start;
+    gap: 2.25rem;
+    padding-top: 2rem;
+  }
+
+  .clock__seconds {
+    padding-top: 0.45em;
+  }
+
+  .greeting {
+    max-width: 100%;
+  }
+}
+
+/* 矮视口（笔记本横屏、分屏）：把节奏收紧，保证搜索框和磁贴都在首屏 */
+@media (max-height: 720px) {
+  .shell {
+    justify-content: flex-start;
+    gap: 1.9rem;
+    padding-top: 1.25rem;
+  }
+
+  .clock__main {
+    font-size: clamp(3rem, 9vw, 4.6rem);
+  }
+}
+</style>

@@ -1,0 +1,455 @@
+/* ===============================================================
+   子午 Meridiem 设计系统
+   ===============================================================
+   这一层是整套界面的唯一真源。组件里不要再写裸色值：
+   颜色一律取语义 token，圆角一律取三档半径，动效一律取音节拍。
+
+   为什么用「语义 token」而不是直接写 Tailwind 色阶：
+   新标签页的背景跟着时段走（ambience），同一个 rgb() 在清晨和深夜
+   落在完全不同的底色上。语义层让「正文 / 次级 / 弱化」在任何时段、
+   任何主题下都是同一个对比度意图，而不是同一个色值。
+   =============================================================== */
+
+/* ---------------------------------------------------------------
+   1. 字体
+   ---------------------------------------------------------------
+   自托管可变字重 woff2（Space Grotesk 300-700 / Manrope 200-800），
+   只带 latin + latin-ext 两个子集，共 ~81KB，随扩展一起打包：
+   扩展要能在离线、无网、CSP 收紧的环境下正常显示，所以不用 CDN。
+   中文走系统字体（PingFang SC / 微软雅黑 / Noto Sans CJK），
+   中文字重不需要单独下载，那会是几 MB。
+   --------------------------------------------------------------- */
+@font-face {
+  font-family: 'Space Grotesk';
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: swap;
+  src: url('../assets/fonts/space-grotesk-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: 'Space Grotesk';
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: swap;
+  src: url('../assets/fonts/space-grotesk-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+@font-face {
+  font-family: 'Manrope';
+  font-style: normal;
+  font-weight: 200 800;
+  font-display: swap;
+  src: url('../assets/fonts/manrope-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: 'Manrope';
+  font-style: normal;
+  font-weight: 200 800;
+  font-display: swap;
+  src: url('../assets/fonts/manrope-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+/* ---------------------------------------------------------------
+   2. 令牌
+   ---------------------------------------------------------------
+   圆角（三档，全站统一，不要临时加第四档）：
+     --radius-control : 交互控件（按钮、输入、分段控件）→ 胶囊
+     --radius-tile    : 内容磁贴（快捷方式图标）        → 方圆形
+     --radius-surface : 浮层容器（下拉、对话框）        → 大圆角
+
+   层级 z-index：集中在这里声明，组件里不要再写裸数字。
+     --z-ambience 0 / --z-content 10 / --z-rail 30 / --z-menu 40
+     --z-toast 60 / --z-dialog 80 / --z-grain 90
+   --------------------------------------------------------------- */
+:root {
+  --radius-control: 999px;
+  --radius-tile: 20px;
+  --radius-surface: 24px;
+  --radius-inner: 14px;
+
+  --z-ambience: 0;
+  --z-content: 10;
+  --z-rail: 30;
+  --z-menu: 40;
+  --z-toast: 60;
+  --z-dialog: 80;
+  --z-grain: 90;
+
+  /* 字体栈：拉丁字形用自托管字体，中文落到系统字体。
+     顺序很重要，中文字形必须排在拉丁之后，否则英文会先用中文字体的拉丁字形。 */
+  --font-sans: 'Manrope', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', system-ui, sans-serif;
+  --font-display: 'Space Grotesk', 'Manrope', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', system-ui, sans-serif;
+  --font-mono: ui-monospace, 'SFMono-Regular', 'JetBrains Mono', 'Cascadia Mono', Menlo, Consolas, monospace;
+
+  /* 动效音节拍：只作用于 transform / opacity */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1);
+  --dur-fast: 140ms;
+  --dur-base: 240ms;
+  --dur-slow: 460ms;
+  --dur-enter: 760ms;
+
+  /* 版心与节奏 */
+  --shell-max: 70rem;
+  --gutter: clamp(1.25rem, 4vw, 3.5rem);
+}
+
+/* ---------- 浅色主题 ---------- */
+:root,
+:root:not(.dark) {
+  color-scheme: light;
+
+  /* 冷中性灰阶：蓝相极轻（色相 210 上下），避免暖灰配青色的浑感 */
+  --bg-base: #f6f8fa;
+  --bg-deep: #e8edf2;
+  --surface: rgb(255 255 255 / 0.72);
+  --surface-strong: rgb(255 255 255 / 0.9);
+  /* 大控件（搜索框）：比磁贴更实一档，否则浅色下会像「没画完的框」 */
+  --surface-control: rgb(255 255 255 / 0.86);
+  --surface-sunken: rgb(15 23 42 / 0.04);
+  --surface-hover: rgb(255 255 255 / 0.98);
+
+  /* 磁贴回退徽标：中性底 + 中性字形 + 站点色细环。
+     --tile-ink 只在悬停时徽标翻成实心站点色块的那一刻用得上，
+     所以必须跟着主题走（浅色主题配白字，深色主题配深字）。
+     --tile-aurora 是站点色在磁贴面上的存在感：浅色主题只给底缘一条窄光，
+     避免半透明浅色玻璃上糊出一块脏晕。 */
+  --tile-ink: #ffffff;
+  /* 胶片颗粒的强度。浅色底上 soft-light 很容易过火，压低一档。 */
+  --grain-opacity: 0.42;
+  --tile-aurora: linear-gradient(
+    to top,
+    color-mix(in srgb, var(--tile-accent) 15%, transparent),
+    transparent 42%
+  );
+
+  --text-1: #101820;
+  --text-2: #3d4a55;
+  --text-3: #55636e;
+  --text-on-accent: #ffffff;
+
+  --line: rgb(16 24 32 / 0.09);
+  --line-strong: rgb(16 24 32 / 0.16);
+  --line-inset: rgb(255 255 255 / 0.72);
+
+  /* 品牌青分两档，别再到处写 #0d9488：
+     --brand       用于「填色 + 白字」的按钮/标记（对纯白 5.47:1，留出余量）
+     --brand-vivid 只给图标、描边、装饰等图形元素用（图形门槛 3:1） */
+  --brand: #0f766e;
+  --brand-hover: #115e59;
+  --brand-vivid: #0d9488;
+  --brand-soft: rgb(13 148 136 / 0.1);
+  --brand-ring: rgb(13 148 136 / 0.28);
+  --focus: var(--brand-vivid);
+  /* 危险动作（删除）。组件里不许再写裸的红色。 */
+  --danger: #b91c1c;
+  --danger-hover: #991b1b;
+  --danger-text: #b91c1c;
+  /* 填色危险按钮上的字色（两套主题都是白字） */
+  --danger-ink: #ffffff;
+  /* 对话框遮罩。不用纯黑，压一层带蓝相的深色 */
+  --scrim: rgb(4 6 10 / 0.5);
+  /* 秒数字：压到 teal-700 才在白底氛围上站得住（3.9:1，大字号门槛 3:1）。
+     teal-600 在这个位置上只有 1.6:1，等于看不见。 */
+  --seconds: #0f766e;
+
+  /* 抬升：阴影带背景色相，不用纯黑 */
+  --shadow-1: 0 1px 2px rgb(16 24 32 / 0.05), 0 1px 1px rgb(16 24 32 / 0.03);
+  --shadow-2: 0 1px 2px rgb(16 24 32 / 0.05), 0 10px 28px -16px rgb(16 24 32 / 0.28);
+  --shadow-3: 0 1px 2px rgb(16 24 32 / 0.06), 0 28px 64px -22px rgb(16 24 32 / 0.34);
+  --shadow-tile: 0 1px 2px rgb(16 24 32 / 0.05), 0 12px 26px -18px rgb(16 24 32 / 0.34);
+  --shadow-tile-hover: 0 2px 4px rgb(16 24 32 / 0.06), 0 22px 40px -18px var(--tile-glow, rgb(16 24 32 / 0.32));
+}
+
+/* ---------- 深色主题 ----------
+   由 useTheme() 在 <html> 上挂 .dark（UnoCSS 配的是 dark: 'class'）。 */
+:root.dark {
+  color-scheme: dark;
+
+  --bg-base: #080b10;
+  --bg-deep: #04060a;
+  --surface: rgb(255 255 255 / 0.055);
+  --surface-strong: rgb(255 255 255 / 0.09);
+  --surface-control: rgb(255 255 255 / 0.075);
+  --surface-sunken: rgb(0 0 0 / 0.24);
+  --surface-hover: rgb(255 255 255 / 0.12);
+
+  /* 深色下悬停翻成亮色块，配深色字。
+     深底吃得住颜色，磁贴面上可以给一圈完整的站点色晕，做出体积感。 */
+  --tile-ink: #101820;
+  /* 深色下没有亮部可压，颗粒再淡一点，避免出现噪点感 */
+  --grain-opacity: 0.3;
+  --tile-aurora: radial-gradient(
+    68% 58% at 50% 106%,
+    color-mix(in srgb, var(--tile-accent) 46%, transparent),
+    transparent 66%
+  );
+
+  --text-1: #e9eef3;
+  --text-2: #b3bfc9;
+  --text-3: #97a4b1;
+  --text-on-accent: #04201d;
+
+  --line: rgb(255 255 255 / 0.1);
+  --line-strong: rgb(255 255 255 / 0.2);
+  --line-inset: rgb(255 255 255 / 0.14);
+
+  --brand: #14b8a6;
+  --brand-hover: #2dd4bf;
+  --brand-vivid: #2dd4bf;
+  --brand-soft: rgb(45 212 191 / 0.12);
+  --brand-ring: rgb(45 212 191 / 0.3);
+  --focus: #2dd4bf;
+  --seconds: #2dd4bf;
+  /* 深色下红色要提亮，否则压在深底上像褐色（对 --bg-base 约 4.6:1）。
+     --danger 是「填色 + 深色字」的按钮底，按 4.85:1 选；
+     --danger-text 只给错误文案用，可以更亮。 */
+  --danger: #dc2626;
+  --danger-hover: #ef4444;
+  --danger-text: #f87171;
+  --danger-ink: #ffffff;
+  --scrim: rgb(0 2 6 / 0.62);
+
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.5);
+  --shadow-2: 0 1px 2px rgb(0 0 0 / 0.45), 0 14px 34px -18px rgb(0 0 0 / 0.75);
+  --shadow-3: 0 1px 2px rgb(0 0 0 / 0.5), 0 32px 70px -24px rgb(0 0 0 / 0.85);
+  --shadow-tile: 0 1px 2px rgb(0 0 0 / 0.45), 0 12px 28px -14px rgb(0 0 0 / 0.7);
+  --shadow-tile-hover: 0 2px 6px rgb(0 0 0 / 0.5), 0 24px 44px -18px var(--tile-glow, rgb(0 0 0 / 0.8));
+}
+
+/* ---------------------------------------------------------------
+   3. 基础
+   --------------------------------------------------------------- */
+html,
+body,
+#app {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-family: var(--font-sans);
+  background: var(--bg-deep);
+  color: var(--text-1);
+}
+
+::selection {
+  background: var(--brand-soft);
+  color: var(--text-1);
+}
+
+/* 焦点环：键盘用户必须看得见焦点在哪（WCAG 2.2）。
+   用 :focus-visible 保证鼠标点击不留环，键盘浏览时始终可见。 */
+.focus-ring:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
+}
+
+/* ---------------------------------------------------------------
+   4. 跨页面共用的基础件
+   ---------------------------------------------------------------
+   设置页 / 弹窗 / 侧边栏会复用新标签页的组件与类名。
+   scoped 样式只作用于组件自己的模板，所以这些必须放全局。
+   --------------------------------------------------------------- */
+
+/* 次级文字：不用 opacity 调淡。
+   opacity 不改 computed color，但会按比例拉低最终对比度
+   （实测 opacity .72 在浅色下只有 4.43:1，低于 AA）。 */
+.text-muted {
+  color: var(--text-3);
+}
+
+/* 主按钮：填色 + 白字，对比度由 token 保证 */
+.primary-control,
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 0.45rem 1.15rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  background: var(--brand);
+  color: var(--text-on-accent);
+  font-family: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  line-height: 1.4;
+  cursor: pointer;
+  transition:
+    background var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-base) var(--ease-out);
+}
+
+.primary-control:hover,
+.btn:hover {
+  background: var(--brand-hover);
+  box-shadow: 0 8px 20px -12px var(--brand-ring);
+}
+
+.primary-control:active,
+.btn:active {
+  transform: scale(0.97);
+}
+
+/* 幽灵按钮：描边 + 玻璃底，用在次级动作上 */
+.ghost-control {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.34rem;
+  padding: 0.34rem 0.72rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: 0.76rem;
+  font-weight: 500;
+  line-height: 1.4;
+  cursor: pointer;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  transition:
+    background var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+
+.ghost-control:hover {
+  background: var(--surface-hover);
+  border-color: var(--line-strong);
+  color: var(--text-1);
+}
+
+.ghost-control:active {
+  transform: scale(0.96);
+}
+
+.kbd {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  padding: 0.08rem 0.34rem;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--surface-sunken);
+  color: var(--text-2);
+}
+
+/* 表单：label 在上，helper 在下，错误再下一行 */
+.dialog-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.6rem 0.75rem;
+  border-radius: var(--radius-inner);
+  border: 1px solid var(--line);
+  background: var(--surface-sunken);
+  color: var(--text-1);
+  font-size: 0.9rem;
+  font-family: inherit;
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
+}
+
+.dialog-input::placeholder {
+  color: var(--text-3);
+}
+
+.dialog-input:focus {
+  outline: none;
+  border-color: var(--brand-vivid);
+  background: var(--surface-strong);
+  box-shadow: 0 0 0 3px var(--brand-ring);
+}
+
+/* ---------------------------------------------------------------
+   5. 动效
+   ---------------------------------------------------------------
+   入场编排：新标签页是「被打开」的，元素按视觉优先级依次落位
+   （时钟 → 问候 → 搜索 → 磁贴），而不是整页一起闪。
+   --------------------------------------------------------------- */
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* 秒针：只呼吸很轻微的一点，避免每秒一次的视觉噪声 */
+@keyframes tick-pulse {
+  0% { opacity: 1; }
+  45% { opacity: 0.42; }
+  100% { opacity: 1; }
+}
+
+.animate-rise-in {
+  animation: rise-in var(--dur-enter) var(--ease-out) both;
+}
+
+.animate-fade-in {
+  animation: fade-in var(--dur-slow) var(--ease-out) both;
+}
+
+/* 数字滚动（切换时间时的轻微弹性），只作用于 transform/opacity */
+@keyframes soft-fade {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+.animate-soft-fade {
+  animation: soft-fade var(--dur-base) var(--ease-out) both;
+}
+
+/* ---------------------------------------------------------------
+   6. 无障碍：尊重系统的「减少动态效果」设置
+   --------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  .animate-rise-in,
+  .animate-fade-in,
+  .animate-soft-fade {
+    animation: none !important;
+  }
+
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* 减少透明度偏好：玻璃材质塌回实心，保证可读性 */
+@media (prefers-reduced-transparency: reduce) {
+  .ghost-control,
+  .primary-control {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: var(--surface-strong);
+  }
+}
