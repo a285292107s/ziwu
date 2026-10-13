@@ -112,9 +112,16 @@ function moveBy(step: -1 | 1) {
       {{ shortcut.name }}
     </span>
 
-    <!-- 编辑模式：排序 + 编辑 + 删除。
+    <!-- 编辑模式：编辑 / 删除 + 排序。
          分成 2x2 而不是排成一行：一行四个按钮会超出磁贴栏宽（5.5rem），
          实测会横向溢出到相邻磁贴下面。
+
+         两行按「干什么」分组，而不是按原来的从左到右数：
+         第一行是「改这块磁贴」（编辑 / 删除），第二行是「把它挪个位置」（左移 / 右移）。
+         左、右两个箭头必须并排在同一行 —— 它们是一对方向相反的兄弟，
+         分到上下两行（原来的 左/编辑 上、右/删除 下）之后方向关系是断的，
+         眼睛得先把四宫格读一遍才知道哪个是左、哪个是右。
+
          排序按钮另外做了「悬停才显形」：4 个按钮一直亮着太吵，
          但它们仍在 DOM 里、仍可 Tab 聚焦，只是平时透明。 -->
     <div
@@ -124,22 +131,36 @@ function moveBy(step: -1 | 1) {
     >
       <button
         type="button"
+        class="tile-action focus-ring"
+        aria-label="编辑这个快捷方式"
+        :data-test="`tile-edit-${shortcut.id}`"
+        @click="emit('edit', shortcut)"
+      >
+        <span class="i-carbon-edit" aria-hidden="true" />
+        <span class="tile-tip" aria-hidden="true">编辑</span>
+      </button>
+      <button
+        type="button"
+        class="tile-action tile-action--danger focus-ring"
+        aria-label="删除这个快捷方式"
+        :data-test="`tile-delete-${shortcut.id}`"
+        @click="emit('remove', shortcut)"
+      >
+        <span class="i-carbon-close" aria-hidden="true" />
+        <span class="tile-tip" aria-hidden="true">删除</span>
+      </button>
+      <button
+        type="button"
         class="tile-action tile-action--reorder focus-ring"
         :aria-disabled="index === 0"
         :aria-label="`将 ${shortcut.name} 前移`"
         :data-test="`tile-left-${shortcut.id}`"
         @click="moveBy(-1)"
       >
-        <span class="i-carbon-arrow-left" />
-      </button>
-      <button
-        type="button"
-        class="tile-action focus-ring"
-        aria-label="编辑这个快捷方式"
-        :data-test="`tile-edit-${shortcut.id}`"
-        @click="emit('edit', shortcut)"
-      >
-        <span class="i-carbon-edit" />
+        <span class="i-carbon-arrow-left" aria-hidden="true" />
+        <!-- 到头了就把提示换成原因：按钮压暗只是「看起来不能点」，
+             这里补一句为什么，省得用户以为按钮坏了 -->
+        <span class="tile-tip" aria-hidden="true">{{ index === 0 ? '已到最前' : '前移' }}</span>
       </button>
       <button
         type="button"
@@ -149,16 +170,8 @@ function moveBy(step: -1 | 1) {
         :data-test="`tile-right-${shortcut.id}`"
         @click="moveBy(1)"
       >
-        <span class="i-carbon-arrow-right" />
-      </button>
-      <button
-        type="button"
-        class="tile-action tile-action--danger focus-ring"
-        aria-label="删除这个快捷方式"
-        :data-test="`tile-delete-${shortcut.id}`"
-        @click="emit('remove', shortcut)"
-      >
-        <span class="i-carbon-close" />
+        <span class="i-carbon-arrow-right" aria-hidden="true" />
+        <span class="tile-tip" aria-hidden="true">{{ index === total - 1 ? '已到最后' : '后移' }}</span>
       </button>
     </div>
   </div>
@@ -301,8 +314,18 @@ a.tile-face:hover ~ .tile-name {
 }
 
 /* ---- 编辑模式的小按钮 ----
-   2x2 排布，整体宽度锁在磁贴栏宽以内（2 个 1.5rem 按钮 + 间距）。 */
+   2x2 排布，整体宽度锁在磁贴栏宽以内（2 个 1.5rem 按钮 + 间距）。
+
+   顺序即「分组」：DOM 依次是 编辑 / 删除 / 前移 / 后移，按两列折行之后
+   正好是「改这块磁贴」在上、「挪它的位置」在下。
+
+   这里刻意**不给按钮设 position**：气泡（.tile-tip）要相对整个 2x2 方块
+   定位，而不是相对它自己那个按钮 —— 按钮一旦成为定位祖先，第二行按钮的气泡
+   就会弹在第一行按钮身上（实测「后移」的提示正好糊住「删除」）。
+   把定位祖先让给 .tile-actions，四个气泡就都落在方块上方，谁也盖不住谁。 */
 .tile-actions {
+  position: relative;
+  z-index: 2;
   display: grid;
   grid-template-columns: repeat(2, 1.5rem);
   gap: 0.2rem;
@@ -374,5 +397,72 @@ a.tile-face:hover ~ .tile-name {
   border-color: var(--danger);
   background: var(--danger);
   color: var(--danger-ink);
+}
+
+/* ---- 气泡提示（tips） ----
+   四个小按钮只有图标，而「铅笔 / ✕ / ← / →」在 1.5rem 的格子里说不清
+   「点了会怎样」—— 尤其两个箭头，是移到隔壁还是移到头，只能靠试。
+   于是鼠标停上去、键盘 Tab 聚焦时弹一句中文。
+
+   气泡是**纯视觉**的补充：`aria-hidden`，读屏软件念按钮自己的 aria-label
+   就够了，不该被念两遍；上不了屏的浏览器也只是少一句提示，不影响操作。
+
+   位置固定在 2x2 方块正上方，**不是各自按钮的上方**：四个按钮挨得太近
+   （间距 0.2rem），按按钮定位的话下面那行的气泡会正好糊住上面那行的按钮。
+   统一放到方块外，谁也盖不住谁。代价是四种状态的提示位置一样，
+   但提示本来就是「跟着操作走的文字」，位置固定反而更好读。
+
+   `--z-toast + 2`：压过相邻磁贴和其它浮层。
+   pointer-events: none 是必须的：气泡一旦吃鼠标，鼠标从按钮挪到气泡上时
+   按钮就丢了 hover，气泡闪一下消失、鼠标回到按钮又出来 —— 会抖。 */
+.tile-tip {
+  position: absolute;
+  bottom: calc(100% + 0.4rem);
+  left: 50%;
+  z-index: calc(var(--z-toast) + 2);
+  padding: 0.2rem 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-base);
+  color: var(--text-1);
+  font-size: 0.66rem;
+  font-weight: 500;
+  line-height: 1.35;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  /* 位移写进 transform：气泡是「从按钮上长出来」的，不是凭空出现 */
+  transform: translateX(-50%) translateY(3px);
+  box-shadow: var(--shadow-2);
+  transition:
+    opacity var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+
+/* 鼠标停上去就显形。
+   不区分「能不能点」：到头的那两个按钮提示的是「已到最前 / 已到最后」，
+   禁用方向更该说清楚，而不是干脆不给提示。 */
+.tile-action:hover .tile-tip,
+/* 键盘用户同样看得到（气泡对 Tab 聚焦显形，和 hover 一样）。
+   键盘上指不到按钮，这句提示就是「这个按钮是干什么的」的唯一线索。 */
+.tile-action:focus-visible .tile-tip {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* 键盘聚焦时不走过渡：提示和焦点环都必须当场可见，不能等它淡进来 */
+.tile-action:focus-visible .tile-tip {
+  transition: none;
+}
+
+/* ---- 高对比度 / 强制色模式 ----
+   Windows 高对比度下 background 会被系统覆盖成主题色，
+   气泡的边框得跟着走，否则文字和底同色 —— 等于看不见。 */
+@media (forced-colors: active) {
+  .tile-tip {
+    border: 1px solid CanvasText;
+    background: Canvas;
+    color: CanvasText;
+  }
 }
 </style>
