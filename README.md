@@ -99,7 +99,7 @@ pnpm dev         # 开发模式：监听改动并打包到 extension/
 > ⚠️ `pnpm typecheck` 依赖 Vite 插件生成的 `src/auto-imports.d.ts` 与 `src/components.d.ts`（两者已被 `.gitignore` 忽略）。
 > **全新克隆后请先执行一次 `pnpm dev` 或 `pnpm build`**，否则会报 `Cannot find name 'browser'`。
 
-> ⚠️ **构建顺序不能省也不能截断**：`vite build`（web）→ `esno scripts/prepare.ts` → background 配置 → content 配置。
+> ⚠️ **构建顺序不能省也不能截断**：`vite build`（web）→ `esno scripts/prepare.ts` → background 配置。
 > 只跑第一段会得到一个「能加载但后台脚本缺失」的 extension；把 `scripts/rebuild.mjs` 的输出接给
 > `Select-Object -First N` 之类会提前终止管道的命令，构建会被中途杀掉。`scripts/rebuild.mjs` 就是为了不再手滑。
 
@@ -113,7 +113,6 @@ mytab/
 │   ├── options/            # 设置页
 │   ├── sidepanel/          # 侧边栏
 │   ├── background/         # 后台 Service Worker（MV3）
-│   ├── contentScripts/     # 注入网页的脚本，用 Shadow DOM 挂载 Vue（脚手架示例）
 │   ├── components/         # 共享组件（自动按需注册）
 │   │   ├── SearchBox.vue     # 多引擎搜索框（新标签页与设置页共用）
 │   │   ├── ShortcutGrid.vue  # 快捷方式网格 + 新增/整理/撤销
@@ -249,15 +248,16 @@ const manifest = {
 
 ### 权限
 
-`src/manifest.ts` 中当前申请了 `tabs`、`storage`、`activeTab`、`sidePanel`，以及 `host_permissions: ['*://*/*']`。
-新标签页本身**不需要** `host_permissions`——如果子午 Meridiem 只在扩展内部运行，建议收窄到最小权限，例如：
+`src/manifest.ts` 中当前申请了 `tabs`、`storage`、`activeTab`、`sidePanel`、`favicon`，以及 `host_permissions: ['*://*/*']`。
+
+- `favicon` 是磁贴取真实站点图标（MV3 的 `/_favicon/` 接口）所需的权限，**不要删**。`_favicon` 只在扩展页面里调用，所以不需要为它声明 `web_accessible_resources`（那是给 content script 用的）。
+- 子午 Meridiem **不注入任何网页脚本**（脚手架时代那份 content script 及其右下角按钮已移除），因此 `host_permissions` 与 `tabs` / `activeTab` 目前没有代码依赖。要收窄权限，请先在真实浏览器里加载 `extension/` 确认磁贴图标仍然正常——`_favicon` 对**用户没访问过**的站点是否依赖 host 权限去实时取图标，靠读文档无法下结论，必须实测：
 
 ```ts
-// 不需要注入网页时，content_scripts 一并去掉
+// 收窄后大致长这样（改完务必真机确认磁贴图标与侧边栏都还在）
 const manifest = {
-  permissions: ['storage'],
+  permissions: ['storage', 'sidePanel', 'favicon'],
   host_permissions: [],
-  content_scripts: [],
 }
 ```
 
@@ -268,14 +268,9 @@ const manifest = {
 
 ### 跨上下文通信
 
-示例见 `src/background/main.ts` 与 `src/contentScripts/index.ts`，使用 [`webext-bridge`](https://github.com/serversideup/webext-bridge)：
+四个页面（新标签页 / 设置 / 弹窗 / 侧边栏）共用同一套组件与 `storage.local`，**当前不需要跨上下文消息通道**。
 
-```ts
-onMessage('get-current-tab', async () => { /* ... */ })
-sendMessage('tab-prev', { title }, { context: 'content-script', tabId })
-```
-
-消息类型在 `shim.d.ts` 的 `ProtocolMap` 中声明，可获得完整类型推导。
+脚手架自带的 `webext-bridge` 示例——`tab-prev` / `get-current-tab` 两个消息、`shim.d.ts` 里的 `ProtocolMap`、以及后台中 `browser.tabs.onActivated` 那段「上报上一个标签页标题」——已随 content script 一并移除。将来确实需要跨上下文通信时再引入。
 
 ### 新增一个页面
 

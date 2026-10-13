@@ -37,7 +37,6 @@ run('清空 dist', bin('rimraf'), ['--glob', 'extension/dist', 'extension/manife
 run('build:web', bin('vite'), ['build'])
 run('build:prepare', bin('esno'), ['scripts/prepare.ts'])
 run('build:background', bin('vite'), ['build', '--config', 'vite.config.background.mts'])
-run('build:js', bin('vite'), ['build', '--config', 'vite.config.content.mts'])
 
 const extra = process.argv[2]
 if (extra) {
