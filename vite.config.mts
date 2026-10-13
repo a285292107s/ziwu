@@ -128,6 +128,21 @@ export default defineConfig(({ command }) => ({
   ...sharedConfig,
   base: command === 'serve' ? `http://localhost:${port}/` : '/dist/',
   server: {
+    /**
+     * 显式绑 127.0.0.1，不要留空。
+     *
+     * Vite 5 的默认值是 `host: 'localhost'`，在 Windows 上只解析并绑定**一个**
+     * 回环地址（本机实测只绑了 `::1`，`127.0.0.1` 直接 ECONNREFUSED）。
+     * 而 `scripts/prepare.ts` 生成的 dev 桩页面里写的是
+     * `http://localhost:3303/<view>/main.ts`，`localhost` 同时解析到 `::1` 和
+     * `127.0.0.1`，浏览器先试哪个并不保证 —— 一旦它挑了 `127.0.0.1`，
+     * 整个应用（连同磁贴的 <a href>）都加载不出来，页面只剩
+     * 「Vite server did not start」，表现为「点图标没反应」，
+     * 但根因其实跟磁贴逻辑毫无关系。
+     *
+     * 钉死 IPv4 之后，桩页面里的 `localhost` 必定解析到这个地址，行为确定。
+     */
+    host: '127.0.0.1',
     port,
     hmr: {
       host: 'localhost',
