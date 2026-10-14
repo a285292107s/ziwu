@@ -48,9 +48,15 @@ node --no-experimental-require-module scripts/preview.mjs <轮次>   # 新标签
 node --no-experimental-require-module scripts/shots.mjs   <轮次>   # 各状态 × 明暗主题截图
 node --no-experimental-require-module scripts/states.mjs  <轮次>   # 交互状态截图
 node --no-experimental-require-module scripts/contrast-audit.mjs   # WCAG 对比度审计
+
+# 天光 / 海面背景（three.js，按需；天空跟真实时间走，用 ?sky= 钉住时刻）
+node --no-experimental-require-module scripts/sky-shots.mjs <轮次> [--season=winter] [--themes=dark] [--only=12,19.6]
+node --no-experimental-require-module scripts/sky-layers.mjs <轮次> <时刻> [light|dark]   # 拆层：-final/-raw/-nogl
+node --no-experimental-require-module scripts/sky-rows.mjs <时刻> [light|dark] [轮次]     # 逐行量 RGB
+node scripts/extract-sky-glsl.mjs                                                         # 从产物里抽 GLSL
 ```
 
-产物统一落在 `docs/review/<轮次>/`。
+截图产物落在 `docs/review/<轮次>/`。
 
 > 截图与审计脚本都要求 `extension/` 是**生产产物**（它们直接加载 `extension/`）。
 > 刚跑过 `pnpm dev` 的话先 `node scripts/rebuild.mjs`。

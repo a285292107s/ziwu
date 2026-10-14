@@ -1,0 +1,1581 @@
+/**
+ * 天光的 WebGL 渲染器 —— 光是照进**水里**的。
+ *
+ * ## 它到底在算什么
+ *
+ * 不是「几个渐变叠一叠」，而是**水下的单次散射积分**：
+ * 相机浸在水面之下若干米，沿视线把水切成若干段，每段累加
+ * **漫射底光**（整个天空是一个面光源，从水面均匀漏下来），
+ * 再乘上两段水的透过率：光从水面走到这一点、光从这一点走到相机。
+ * （**直射光柱那一项已经删掉了** —— 用户明确要求，理由见 water.frag.glsl 的 waterVolume。）
+ *
+ * 于是这些现象是**算出来的，不是画出来的**：
+ *   - 越往下越冷。水对红光的吸收比蓝绿快一个量级，所以同一束光
+ *     在水面附近是暖白的，走到十几米下只剩青蓝 —— 这个色相梯度是吸收系数的直接结果。
+ *   - 抬头只有一个亮窗。Snell 窗的半角 48.6° 是 asin(1/1.333) 算出来的，
+ *     窗外水面变成一面镜子（全反射），映的是水里的暗 —— 明暗分界不用画。
+ *   - 太阳越低，水下的光柱越**斜**，但斜不过 48.6°。空气里贴着地面走的光一进水就被
+ *     Snell 折射掰进这个锥里，于是不管太阳多低，水下的光柱都不会躺平 ——
+ *     这就是水下照片总是显得安静的原因。正午的光柱几乎是垂直的。
+ *   - 浅水主题看得见海底。白沙把光弹回来，往下看是亮的 —— 画面因此有了「地平」，
+ *     不再是一块无方向的渐变，可读性也有了物理下限。
+ *
+ * ## 三个关键取舍
+ *
+ * 1. **主题决定曝光，而介质负责让这件事成立。** 浅色主题和深色主题用的是同一组水的
+ *    光学常数、同一个太阳，差别只有一个**相机深度**：浅色浮在 2m 的浅水，深色沉在
+ *    30m 的深水。亮度差于是不是「调出来的」，是深度本身的物理结果。
+ * 2. **闭环自动曝光是最后一道保险，不是主要手段。** 每 2 秒读一次内容区的真实像素，
+ *    把亮度拉回主题该在的区间（±2 档以内）。它只做修正 —— 一旦让它去补 5 档以上的差距，
+ *    增益会顶到上限、整幅画面糊成一片灰。
+ * 3. **不是演示，是背景。** 相机几乎不动（指针只带一点点视差），波纹漂得很慢。
+ *    这是新标签页，用户是来搜索的，不是来看特效的。
+ *
+ * ## 性能
+ *
+ * 水的散射是低频信号 → 1/3 分辨率渲染再让浏览器放大，肉眼分不出来；
+ * 目标 30fps（这片水一分钟才动一点点）；掉帧自动降分辨率；页面不可见就停。
+ */
+
+import * as THREE from 'three'
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js'
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js'
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js'
+import type { SkyFrame } from './sky'
+import { SCATTER_NORM } from './sky'
+import { createOceanField } from './sky/ocean'
+import type { OceanStats } from './sky/ocean'
+import tonemapFrag from './sky/tonemap.frag.glsl?raw'
+import tonemapVert from './sky/tonemap.vert.glsl?raw'
+import waterFrag from './sky/water.frag.glsl?raw'
+import waterVert from './sky/water.vert.glsl?raw'
+
+/* 着色器现在是独立的 .glsl 文件，用 Vite 的 ?raw 当字符串导进来。
+ *
+ * 为什么非要从模板字面量里搬出来：GLSL 注释里只要出现一个反引号，模板字符串
+ * 就在那里被截断。这个坑在这个文件里踩过两次，而且 node scripts/rebuild.mjs
+ * 照样打印「✓ 生产构建完成」，只有 pnpm typecheck 才会报出来 —— 也就是说
+ * 构建成功完全不能证明着色器是完整的。抽成文件之后，这个失败模式从根上消失。
+ *
+ * 分工：
+ *   water.*   —— 水体本身，输出**线性 HDR**（不做色调映射，留给泛光）
+ *   tonemap.* —— 泛光之后的最终 pass：ACES + sRGB + 抖动
+ */
+
+/** 一条亮度带的统计量 */
+export interface SkyBand {
+  mean: number
+  p10: number
+  p50: number
+  p90: number
+}
+
+export interface SkyProbe {
+  /** 内容区的平均相对亮度 */
+  mean: number
+  /** 第 10 百分位。浅色主题盯的是它 —— 画面里最暗的那一小片决定字还读不读得出来 */
+  p10: number
+  /** 中位数 */
+  p50: number
+  /** 第 90 百分位；小面积的高光（Snell 窗里的太阳、星）不该主导曝光 */
+  p90: number
+  /** 第 95 百分位 */
+  p95: number
+  min: number
+  max: number
+  /**
+   * **正文那一条带子**的统计量（内容区上部的 20%）。
+   *
+   * 这是浅色主题真正的可读性约束所在。原先拿整幅画面的 p10 去控曝光，等于要求
+   * 「画面里最暗的 10% 也得亮过 0.5」—— 那恰恰是「水里必须有一块够暗的地方」的反面，
+   * 于是整幅画被锁成一片浅底，光柱再准也没有明暗可用。
+   * 可正文只贴在**一条带子**上：钟点、日期、问候。别处暗下来不影响任何一个字。
+   * 约束收到它应该在的地方之后，画面的下半部分才终于可以暗下去。
+   */
+  text: SkyBand
+  /** 这一帧实际用的曝光增益（闭环控制器的输出） */
+  gain: number
+  /** 这一帧的渲染分辨率比例（已被像素预算夹过，就是画面真正的像素密度） */
+  scale: number
+  /** 自适应控制器手里的目标比例。和 scale 不同时，差值就是像素预算砍掉的部分 */
+  scaleTarget: number
+  /**
+   * **真实性能**：按帧率、提交耗时、GPU 计时。
+   *
+   * 加这一块的原因是一次误判：原来的自适应分辨率只看
+   * `performance.now() - startedAt` 包住 `drawArrays` 的耗时，而 WebGL 的绘制
+   * 是**异步提交**——CPU 把命令塞进队列就返回了，真实的 GPU 开销根本不在这段里。
+   * 于是 490×373 这种小缓冲上它永远读到「很闲」，分辨率一路涨到上限 0.5 并停住，
+   * 而那**不是**性能好的证据，只是尺子坏了。
+   *
+   * 现在的判据是**交付出去的帧率**（两次真实绘制之间的墙钟间隔），它把 GPU 反压
+   * 也算了进去：GPU 跟不上时命令队列积压，rAF 回调被推后，交付帧率就会掉。
+   * 另外尽量拿显卡自己的计时（EXT_disjoint_timer_query_webgl2）作旁证，
+   * 拿不到时 `gpuMs` 是 null，**不会**拿提交耗时冒充它。
+   */
+  perf: SkyPerf
+  /**
+   * FFT 波场的诊断量（初始化时实测一次）。驱动不支持浮点 render target 时为 null。
+   *
+   * 挂在这里是为了让「这水对不对」有可核对的第一手数字：谱推出来的斜率均方根
+   * 和 GPU 回读的实测值应该对得上，对不上就说明归一化或索引约定错了。
+   */
+  ocean: OceanStats | null
+  /**
+   * **元素级**的正文背景统计（调用方传了 `getTextRects` 才有，否则 null）。
+   *
+   * 为什么非要有这一块：`text` 那条带子是**整幅宽度**的，而字只占左边一小块 ——
+   * 两者不是一回事。一直以来是靠 `FLOOR_LIGHT` 这个常数替元素级留余量，
+   * 代价是**整幅画**都被更重的薄膜盖住：sky17 实测为了保住左边那几个字，
+   * 浅色薄膜 alpha 被推到 0.31（正午）/ 0.41（日落）。
+   * 改成直接量元素框，那份余量就只花在有字的地方。
+   *
+   * p05/p95 而不是 min/max：单像素的极值会被抖动噪声主导，
+   * 而审计脚本用的也是 p05（对比度分布的第 5 百分位），两边口径对齐。
+   */
+  elements: {
+    count: number
+    /** 每个元素框内背景亮度的 p05（最暗的一档；浅色主题怕它） */
+    low: number[]
+    /** 每个元素框内背景亮度的 p95（最亮的一档；深色主题怕它） */
+    high: number[]
+    /** 浅色主题的驱动量：所有元素里**最暗**的那个 p05 */
+    worstLow: number
+    /** 深色主题的驱动量：所有元素里**最亮**的那个 p95 */
+    worstHigh: number
+    /**
+     * 每个元素的中心，**视口 CSS 比例**（0~1）。
+     *
+     * 薄膜是一条径向渐变，同一份 opacity 在不同位置给出的**实际 alpha 不同** ——
+     * 调用方要按这个位置把 opacity 反算回去（见 SkyBackdrop 的 veilFactor）。
+     * 不给这个，就会拿一个「假设薄膜满强度」的 opacity 去压一个只有 0.85 强度的地方，
+     * 结果背景达不到目标（实测：日落问候语只到 0.426，目标是 0.50）。
+     */
+    centers: { x: number, y: number }[]
+    /**
+     * **真正被采样的那些框**（视口 CSS 像素，顺序与 `low`/`high`/`centers` 一一对应）。
+     *
+     * 为什么必须回报它，而不是让调用方自己再查一次 DOM：
+     * 探针会把**落到画布之外**的框跳过（这个页面纵向溢出 195px，
+     * 磁贴栏最后两排在视口外）。调用方按同一套选择器再数一遍会数到 62 个，
+     * 而探针只接受了 48 个 —— 数量对不上就走退路，**磁贴区于是完全没有薄膜**，
+     * 表现成「深色主题磁贴站名对比度 1.86」。这个坑实测踩过（%TEMP%\rectdiag.mjs）。
+     */
+    rects: SkyTextRect[]
+  } | null
+}
+
+export interface SkyPerf {
+  /** 实际交付的帧率（近 2 秒窗口），这是自适应用的主信号 */
+  fps: number
+  /** CPU 侧提交耗时 EMA（毫秒）。**不含 GPU 时间**，只用来发现主线程卡顿 */
+  submitMs: number
+  /**
+   * GPU 每帧耗时（毫秒），来自 EXT_disjoint_timer_query_webgl2；
+   * 扩展不可用时为 null —— 宁可没有，也不要拿提交耗时冒充
+   */
+  gpuMs: number | null
+  /** 期待的帧间隔（毫秒） */
+  budgetMs: number
+  /** 上一次自适应分辨率的决定（up / down:fps / down:cpu / hold:band / hold:max） */
+  adapt: string
+}
+
+/**
+ * 一个正文元素在**视口 CSS 像素**里的框。
+ *
+ * 为什么要由调用方传进来：可读性的判据是「**每个元素自己框内**最不利的那块背景」，
+ * 而渲染器不该去查 DOM。SkyBackdrop 有 DOM，它量好框传进来。
+ */
+export interface SkyTextRect {
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
+export interface SkyRendererOptions {
+  /** 渲染分辨率相对 CSS 像素的比例 */
+  renderScale?: number
+  /** 目标帧率。天空变化极慢，30 已经绰绰有余 */
+  targetFps?: number
+  /** 每隔一段时间回报内容区的真实像素亮度 */
+  onProbe?: (probe: SkyProbe) => void
+  /**
+   * 回报「正文元素各自在哪儿」。给了它，探针就会额外量**元素级**的背景统计
+   * （见 SkyProbe.elements），闭环也就用元素级的值驱动薄膜 —— 那才是判据本身。
+   * 不给就退回整条带的统计量。
+   */
+  getTextRects?: () => SkyTextRect[]
+  /**
+   * 闭环自动曝光。默认开。
+   *
+   * 它是「正文可读」的**主要**保障机制：天空自己不知道字压在上面，
+   * 只有回读真实像素、盯住最坏的那一侧，才能保证任何时刻任何主题下正文都够清楚。
+   * 关掉只在一种情况下有意义：想量某一片天在固定增益下的原始色相。
+   */
+  autoExposure?: boolean
+  /** 画面可以露出来了（首帧画完、再等一帧 —— 理由见 ready() 的注释） */
+  onReady?: () => void
+  /** 已经降到最低分辨率还是吃不下，调用方应该切回 CSS 背景 */
+  onTooSlow?: () => void
+  /**
+   * 主题切换时水体参数的过渡时长（毫秒），见 `THEME_BLEND_MS`。0 = 硬切。
+   * `prefers-reduced-motion` 的调用方必须传 0。
+   */
+  themeBlendMs?: number
+}
+
+export interface SkyRenderer {
+  supported: boolean
+  setFrame: (frame: SkyFrame) => void
+  setPointer: (nx: number, ny: number) => void
+  /**
+   * 在画面上投一圈涟漪（clearwater 的 tap-to-ripple）。
+   *
+   * 参数是**视口归一化坐标**（x 从左、y 从上，0~1）。CPU 侧按着色器同一个
+   * rayDir 把这一点打到水面上（求交 t = depth/dir.y），得到世界 xz 后塞进
+   * uDrops 环形缓冲。dir.y ≤ 0（看向天空上方）时不落点。
+   */
+  addDrop: (nx: number, ny: number) => void
+  start: () => void
+  stop: () => void
+  /** 只画一帧（prefers-reduced-motion 用：有画面，但不动） */
+  renderOnce: () => void
+  dispose: () => void
+}
+
+/**
+ * 竖直视场角。**这个数不是风格选择，是构图能不能成立的前提。**
+ *
+ * 画面被地平线切成上下两块，各自占多少只由俯仰角和视场角决定（针孔投影）：
+ *
+ *   地板占比 = 0.5 − 0.5·tan(pitch)/tan(FOV/2)
+ *   光窗占比 = (pitch + FOV/2 − 41.4°) / FOV     ← 41.4° 是全反射的下边界（临界角）
+ *
+ * 两个式子一起看就明白了：68° 时 tan(FOV/2)=0.675，pitch 每加一度地板就掉 2.4 个点，
+ * 而光窗要到 pitch>7.4° 才进画面。也就是说 68° 下**光窗和地板抢同一块画布**：
+ * pitch 13° 只剩 8% 的天窗和 31% 的地板，pitch 30° 天窗有 33% 而地板剩不到 1%。
+ * 之前两轮反复在这两个数之间来回挪，怎么挪都不对，就是因为分母太小。
+ *
+ * 92° 时 tan(FOV/2)=1.036：pitch 13° 给出 19% 光窗 + 39% 地板，中间还有 39% 的水体
+ * —— 亮天窗 / 暗水体 / 亮沙地三段终于同时在场，这正是想要的那条纵向剖面。
+ * 超广角本身也是水下摄影的本来面目：贴着水面拍，视场一定是宽的。
+ */
+const FOV_Y = 92
+/** 再压一道总像素上限：超宽屏上不做无谓的填充 */
+const MAX_PIXELS = 240 * 1024
+/**
+ * **水面时钟相对真实时间的倍率。** 1 = 真实速度，越小越舒缓。
+ *
+ * 用真实物理算一下就知道为什么原来的速度是「跳」的：这套波场的峰值波长
+ * `K_PEAK = TAU/0.7`，对应角频率 `ω = sqrt(g·k) = sqrt(9.81 × 8.98) ≈ 9.4 rad/s`
+ * —— 那个成分的周期只有 **0.67 秒**。峰值波长又是频谱里能量最集中的一处，
+ * 所以画面上的闪烁主要就是它在带。水下贴着水面看，当然就是这个速度，
+ * 但**贴在时钟和搜索框后面当背景，它太快了**：眼睛会一直被抓过去。
+ *
+ * 这不是「假造一个慢动作」，而是把时间轴整体放慢 ——
+ * 波与波之间的**相对关系完全不变**（色散、聚焦、焦散都是同一套），
+ * 只是整体乘了一个系数，所以看上去仍然是「真的水」，只是更从容。
+ *
+ * 0.45 ⇒ 峰值成分周期约 1.5 秒。再慢（0.3 以下）会开始显得黏滞、像慢动作回放。
+ */
+const WATER_TIME_SCALE = 0.45
+/** 自动曝光的增益范围。上限留给夜晚，下限留给深色主题的正午。 */
+const GAIN_MIN = 0.03
+const GAIN_MAX = 4
+
+/**
+ * 增益过渡的时间常数（秒）。
+ *
+ * 闭环每次探测给出的是一个**阶跃**值（单步限幅 ±45%），切主题时更是要跨一个量级
+ * （浅色 exposure 3.96 / 深色 0.75，实测夜里两档的稳态增益差 ~9 倍）。
+ * 把阶跃直接乘进画面，看到的就是「黑一下再跳回来」。
+ * 这里让实际使用的增益按这个时间常数**指数逼近**控制器的目标：
+ * 30fps 下 0.2 秒走完约 80%，稳态时命令值和显示值本来就几乎相等
+ * （控制器每 2 秒才动 1.4%），所以这段过渡只在阶跃真的发生时才看得见。
+ */
+const GAIN_EASE_S = 0.2
+
+/**
+ * 主题切换时，水体参数的过渡时长（毫秒）。
+ *
+ * 浅色和深色不是「同一个场景换个颜色」——**是两片水**：2m 浅水 vs 30m 深水，
+ * 曝光差一个量级，俯仰差 6.2°。之前这些量在一帧里同时换掉，画面是一刀切
+ * （实测：合成帧的亮度在**一帧之内**从 0.84 掉到 0.019，Δ=0.82）。
+ * 这里把这一帧摊成一段：所有参数（深度、曝光、消光、焦散、沙面、俯仰、
+ * 天空亮度…）按 smootherstep 插值，两端一阶导为 0，起停都不顿。
+ *
+ * 720ms 是照设计令牌选的：页面入场是 `--dur-enter` 760ms、薄膜过渡 1200ms，
+ * 同量级才不会显得比页面本身更急或更黏。
+ *
+ * **实测把它从 720 抬到 1200。** 亮度不是参数的线性函数：深度从 1.15m 到 9m，
+ * 透过率按 Beer–Lambert 走指数，浅水那点沙面一反光就没了 —— 参数均匀地走，
+ * 画面亮度却会在中段一头扎下去（720ms 那版实测：一次帧间跳变就有终值的 85%）。
+ * 摊到 1200ms 之后每一帧的跳变小一个量级，读起来才是「沉下去」而不是「闪一下」。
+ *
+ * `prefers-reduced-motion` 时调用方传 0 —— 那种情况下渲染器只画一帧，
+ * 过渡会永远停在起点。
+ */
+export const THEME_BLEND_MS = 1200
+
+/**
+ * 开页热机时长（毫秒）。这段时间里的帧是**一次性初始化**的产物 ——
+ * 着色器编译、波场回读标定、页面图标取色都挤在这里 —— 不代表稳态性能，
+ * 所以既不进 submitMs 的 EMA，也不参与自适应分辨率、不计入帧率窗口。
+ *
+ * 1500 是照着实测定的：修复前那串长任务（275/472/419/107ms）在首帧之后
+ * ~1.4 秒内结束，之后帧间隔立刻回到 17ms（60fps）。取整到 1.5 秒留一点余量，
+ * 同时不会把「开页后的第一眼」拖得太久：曝光闭环的密集探测（前 6 次、每 320ms）
+ * 仍然照旧跑，画面该收敛的照样在两秒内收敛。
+ */
+const WARMUP_MS = 1500
+
+/**
+ * ACES 拟合曲线的反函数。
+ *
+ * 闭环必须**在场景空间里做误差**，这是它能不能收敛的关键。
+ * 反读回来的分位数是显示后的亮度（ACES + gamma 之后），而增益乘的是 ACES 之前的光。
+ * 直接拿显示亮度的比值去乘增益，等于假设这条曲线是线性的 ——
+ * 可它偏偏在肩部斜率只有 0.2，于是「把 0.854 拉到 0.762」这件事
+ * 每次只能推进百分之二，几十次探针都到不了，画面一直停在过曝状态。
+ * 换成场景空间，同样的误差一步就走完大半。
+ *
+ * 拟合式是 x 的二次有理函数，所以反函数就是一个二次方程，不需要迭代：
+ *   y(2.43x² + 0.59x + 0.14) = 2.51x² + 0.03x
+ *   ⇒ (2.43y − 2.51)x² + (0.59y − 0.03)x + 0.14y = 0
+ */
+function acesInv(y: number): number {
+  const t = Math.min(Math.max(y, 0), 0.999)
+  const a = 2.43 * t - 2.51
+  const b = 0.59 * t - 0.03
+  const c = 0.14 * t
+  // a → 0 时退化成一次方程；ACES 的渐近线在 1.033 附近，0.999 还差得远，够用
+  if (Math.abs(a) < 1e-6)
+    return -c / b
+  const d = Math.sqrt(Math.max(b * b - 4 * a * c, 0))
+  // a < 0（t < 1.033），正根取 −b − √D 这一支
+  return (-b - d) / (2 * a)
+}
+
+/**
+ * 把两帧的参数按 k（0..1）插值，用于主题过渡。
+ *
+ * **只有两套主题真的不同的量会动。** 太阳/月亮的位置、`scatterNorm`、
+ * 水的消光与散射系数都是天文量或常量，两帧里本来就一样，插了也是原地不动；
+ * 真正在过渡的是深度（1.15 → 9）、曝光（3.96 → 0.75）、沙面、焦散、
+ * 天空亮度、相机俯仰这些东西。
+ *
+ * 离散量（`dark` / `phase` / `label` / `timeMs`）一律取目标帧的：插值一个
+ * 布尔值或阶段名没有意义。
+ *
+ * **纯亮度乘子走对数插值**（`exposure`、`targetLuminance`）：这两个量是
+ * 「亮多少倍」的描述，等比变化在视觉上才是匀速的。线性插值会让暗的那一端
+ * 变化过快（0.42 → 0.07 线性走，前一半就掉了 3 倍）。其余量线性插值 ——
+ * 两端一阶导为零的平滑由调用方给的 k 负责（smootherstep），这里只做混合。
+ */
+const GEOMETRIC_KEYS = new Set(['exposure', 'targetLuminance'])
+
+/**
+ * 沙面这个量不能线性插值。
+ *
+ * `floorDrop` 是「沙在相机下方多少米」，0 表示**没有底**。线性地从 1.6 走到 0，
+ * 等于让沙面一边靠近一边变亮，然后在最后一刻凭空消失 —— 亮度上是一次**尖峰**，
+ * 实测它占了浅→深那一版帧间跳变的大头。
+ *
+ * 所以过渡期间取两端里「有沙」的那一侧，让它恒在 1.6m：水一边加深，透过来的光
+ * 按 Beer–Lambert 指数衰减，沙自己就暗下去了 —— 而深度到位（9m）之后再让沙消失，
+ * 它那时的贡献已经被水吃掉，看不出来。反过来深→浅也一样：沙一开始就在，
+ * 水变浅的过程中它自己亮起来，中间没有任何突变。
+ */
+const FLOOR_KEYS = new Set(['floorDrop'])
+
+function mixFrame(from: SkyFrame, to: SkyFrame, k: number): SkyFrame {
+  const out: Record<string, unknown> = { ...to }
+  const src = from as unknown as Record<string, unknown>
+  for (const key of Object.keys(out)) {
+    const a = src[key]
+    const b = out[key]
+    if (typeof a === 'number' && typeof b === 'number') {
+      if (FLOOR_KEYS.has(key))
+        out[key] = Math.max(a, b)
+      else if (GEOMETRIC_KEYS.has(key) && a > 0 && b > 0)
+        out[key] = a * (b / a) ** k
+      else
+        out[key] = a + (b - a) * k
+    }
+    else if (Array.isArray(a) && Array.isArray(b) && a.length === b.length) {
+      out[key] = (b as number[]).map((v, i) => (a as number[])[i] + (v - (a as number[])[i]) * k)
+    }
+  }
+  return out as unknown as SkyFrame
+}
+
+/** 不支持的渲染器：调用方不用写 if，所有方法都是空操作 */
+function nullRenderer(): SkyRenderer {
+  return {
+    supported: false,
+    setFrame: () => {},
+    setPointer: () => {},
+    addDrop: () => {},
+    start: () => {},
+    stop: () => {},
+    renderOnce: () => {},
+    dispose: () => {},
+  }
+}
+
+export function createSkyRenderer(
+  canvas: HTMLCanvasElement,
+  options: SkyRendererOptions = {},
+): SkyRenderer {
+  const targetFps = options.targetFps ?? 30
+  const autoExposure = options.autoExposure ?? true
+  const themeBlendMs = Math.max(0, options.themeBlendMs ?? THEME_BLEND_MS)
+  const minScale = 0.18
+  const maxScale = 0.5
+
+  let scale = Math.min(Math.max(options.renderScale ?? 0.34, minScale), maxScale)
+
+  /* ---- three.js 渲染器 ----
+   *
+   * 账要先算清楚：换成 three.js **不是**为了换掉水。
+   *
+   * 水（波谱、体积步进、Snell 窗、Fresnel、对数正态焦散）是算出来的，
+   * 八百多行 GLSL，逐帧验过。three.js 的 Water2 / Reflector 换不了它 ——
+   * 那两个 helper 都**默认相机在水面之上**，从水下往上看根本没有实现
+   * （three.js 论坛上问这件事的帖子至今无人回答）。所以水仍然是我们自己的
+   * shader，一行没改。
+   *
+   * 真正买到的是**后处理管线**：EffectComposer + UnrealBloomPass。
+   * 光柱和焦散的高光要溢出到邻近像素才有「亮」的感觉，单 pass 做不到这一点，
+   * 而它恰好是这类画面最容易被一眼看出的差距。附带买到的是尺寸管理、
+   * 上下文丢失处理、程序缓存这些管道。
+   *
+   * 代价：three 是这个项目**第一个运行时依赖**（此前 0 个），新标签页的包会变大。
+   * 另外换渲染器会让 sky13 那一整套性能与对比度基线全部作废 —— 要重测，不能继承。
+   */
+  let renderer: THREE.WebGLRenderer
+  try {
+    renderer = new THREE.WebGLRenderer({
+      canvas,
+      alpha: false,
+      antialias: false,
+      depth: false,
+      stencil: false,
+      premultipliedAlpha: false,
+      preserveDrawingBuffer: false,
+      powerPreference: 'low-power',
+    })
+  }
+  catch (error) {
+    /* three.js 拿不到上下文时是**抛异常**，不是返回 null。
+       而降级路径必须安静：scripts 里的 skydeg.mjs 会把 getContext 打成永远返回
+       null，要求这里老老实实退回 CSS 兜底。所以构造本身要包起来 ——
+       只做特性检测是不够的。 */
+    console.warn('[sky] 建不出 WebGL 上下文，走 CSS 降级：', error)
+    return nullRenderer()
+  }
+
+  // 显式标注：下面的回调里 TS 不会保留对 const 的窄化
+  const gl: WebGL2RenderingContext = renderer.getContext() as WebGL2RenderingContext
+
+  /* 颜色管理整条关掉。这条管线里的颜色是**一步一步自己算出来的**：
+     线性 HDR → 泛光 → ACES → sRGB。three.js 不需要、也不该再插一手 ——
+     它哪怕只做一次 sRGB 转换，曝光闭环用的 acesInv() 就全错位了。 */
+  THREE.ColorManagement.enabled = false
+  renderer.toneMapping = THREE.NoToneMapping
+  renderer.outputColorSpace = THREE.LinearSRGBColorSpace
+  // 分辨率由 render target 控制，canvas 的像素尺寸在 resize() 里定
+  renderer.setPixelRatio(1)
+  renderer.setClearColor(0x000000, 1)
+
+  /* GPU 计时用的是可选扩展，Chrome 出于安全和稳定性考虑时开时关。
+     拿不到就让它一直 null —— 交付帧率本身已经是端到端的真实信号，
+     gpuMs 只是旁证，不值得为它写一条「猜」的退路。 */
+  const disjointTimer = gl.getExtension('EXT_disjoint_timer_query_webgl2') as
+    | { TIME_ELAPSED_EXT: number, GPU_DISJOINT_EXT: number }
+    | null
+
+  /* 着色器错误检查提前打开：FFT 海面（ocean.ts）自己也会编译三趟全屏 pass，
+     那些程序的编译失败同样只能靠它报出来。 */
+  renderer.debug.checkShaderErrors = true
+
+  /* FFT 海面。每帧 18 趟全屏 pass，把随机波场算成一张纹理（见 ocean.ts）。
+     必须在 composer.render 之前跑完 —— 主着色器要采样它的结果。
+     失败时（驱动不支持浮点 render target）退回一张 1×1 常值纹理：
+     斜率为零、焦散为 1，水会变成一潭平静的水，但辐射传输那一层仍然成立。 */
+  const ocean = createOceanField(renderer)
+  const flatOcean = ocean
+    ? null
+    : (() => {
+        const texture = new THREE.DataTexture(
+          new Float32Array([0, 0, 0, 1]),
+          1,
+          1,
+          THREE.RGBAFormat,
+          THREE.FloatType,
+        )
+        texture.needsUpdate = true
+        return texture
+      })()
+
+  /* 泛光的三个参数。阈值取在 **1.0 之上**：只让真的过曝的部分发光。
+     阈值一低就变成整体发糊 —— 那不是辉光，那是没对上焦，也是最容易看出来的
+     廉价 HDR。线性 HDR 上的 1.0 大致就是 ACES 曲线的肩部起点。
+     强度刻意压得小：这片水里该发光的只有光柱和焦散的高光，
+     大面积的水体一旦开始泛光，画面立刻失去「水」的质感。 */
+  const BLOOM_STRENGTH = 0.38
+  const BLOOM_RADIUS = 0.55
+  const BLOOM_THRESHOLD = 1.0
+
+  /* uniform 从「查 location + 逐个 uniformNf」变成一个有名字的对象。
+     值本身一个没改 —— 这些数字是物理推出来的，不是调出来的。
+     water28 清掉了五个没有任何读取点的 uniform（uNight / uStarAmount / uStarX-Y-Z）
+     与它们的 starBasis 上游，并把两个「其实只在 CPU 侧算一次」的量提了上来。 */
+  const waterUniforms = {
+    uResolution: { value: new THREE.Vector2(1, 1) },
+    uTime: { value: 0 },
+    uSunDir: { value: new THREE.Vector3(0, 1, 0) },
+    uMoonDir: { value: new THREE.Vector3(0, 1, 0) },
+    uCam: { value: new THREE.Vector2(0, 0) },
+    uTanHalfFov: { value: Math.tan((FOV_Y * Math.PI) / 360) },
+    uExposure: { value: 0.6 },
+    uGain: { value: 1 },
+    uDepth: { value: 2 },
+    uFloorDrop: { value: 1.6 },
+    uBeamDir: { value: new THREE.Vector3(0, 1, 0) },
+    uAmbDir: { value: new THREE.Vector3(0, 1, 0) },
+    uBeamTint: { value: new THREE.Vector3(1, 1, 1) },
+    uBeamPower: { value: 1 },
+    uAmbPower: { value: 1 },
+    uAbsorb: { value: new THREE.Vector3(0.36, 0.062, 0.048) },
+    /* σs/σt 的谱形只在 CPU 侧算一次（它只依赖 SCATTER / EXTINCT 两个常量），
+       以前是每个像素做三次除法和一次点积 —— 提到这里之后着色器里没有除法了。 */
+    uScatterNorm: { value: new THREE.Vector3(...SCATTER_NORM) },
+    uPhaseG: { value: 0.6 },
+    uScatterTint: { value: new THREE.Vector3(0.2, 0.5, 0.6) },
+    uCaustic: { value: 1 },
+    uSurfaceGlow: { value: 0.2 },
+    uSkyAbove: { value: new THREE.Vector3(0.5, 0.7, 0.9) },
+    uOcean: { value: ocean?.texture ?? flatOcean },
+    /* 倒数而不是原值：取样是热点路径，除法在这里预先做掉 */
+    uInvPatch: { value: ocean ? 1 / ocean.patch : 1 },
+    /* 点击涟漪（clearwater 的 tap-to-ripple，解析波包版，见 water.frag.glsl）。
+       环形波有闭式解，不必为它开第二条 FFT 链；这里只维护最多 8 个环的 (xz, 出生时刻, 振幅)。 */
+    uDropCount: { value: 0 },
+    uDrops: { value: Array.from({ length: 8 }, () => new THREE.Vector4(0, 0, 0, 0)) },
+  }
+
+  /* RawShaderMaterial：着色器本来就是独立的 GLSL ES 3.00 文件，
+     不想要 three.js 往里注入的那一堆 chunk（注入进去反而会把
+     precision / in / out 声明搞重复）。
+     #version 由 three.js 按 glslVersion 自动加在**文件开头**，
+     所以 .glsl 文件里不能自己写 —— GLSL 要求 #version 必须是第一行。
+     GLSL3 下 three.js 同样不替我们声明属性，water.vert.glsl 里那句
+     `in vec3 position;` 因此是必需的。 */
+  const waterMaterial = new THREE.RawShaderMaterial({
+    glslVersion: THREE.GLSL3,
+    vertexShader: waterVert,
+    fragmentShader: waterFrag,
+    uniforms: waterUniforms,
+    depthTest: false,
+    depthWrite: false,
+  })
+
+  /* 全屏那一个三角形：几何体是 2×2 的平面，配正交相机后顶点位置
+     正好就是裁剪空间坐标，所以顶点着色器几乎什么都不用做。
+     frustumCulled 必须关掉 —— 否则 three.js 会拿默认包围盒去剔除它。 */
+  const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), waterMaterial)
+  quad.frustumCulled = false
+  const quadScene = new THREE.Scene()
+  quadScene.add(quad)
+  const quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
+
+  /* Composer 的 render target 用 HalfFloatType：线性 HDR 必须能存住
+     大于 1.0 的值，8bit 会把高光直接切平，泛光就无从挑起了。
+     depth/stencil 都关掉 —— 全程只有全屏四边形，用不上。 */
+  const composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(1, 1, {
+    type: THREE.HalfFloatType,
+    depthBuffer: false,
+    stencilBuffer: false,
+  }))
+  composer.addPass(new RenderPass(quadScene, quadCamera))
+  composer.addPass(new UnrealBloomPass(
+    new THREE.Vector2(1, 1),
+    BLOOM_STRENGTH,
+    BLOOM_RADIUS,
+    BLOOM_THRESHOLD,
+  ))
+  // 最终 pass 负责 ACES + sRGB + 抖动，见 tonemap.frag.glsl
+  composer.addPass(new ShaderPass({
+    uniforms: { tDiffuse: { value: null } },
+    vertexShader: tonemapVert,
+    fragmentShader: tonemapFrag,
+  }))
+
+  /* 提前把着色器编出来，并**检查它到底编没编过**。
+     three.js 编译失败时只是往 console 里打一段日志，然后照常出图 ——
+     也就是一块纯黑的画布。用户看到的是「背景瞎了」，而不是降级到 CSS。
+     所以这里主动编译一次，把链接失败的程序当成编译失败处理。
+     renderer.compile() 顺带把首次渲染的编译卡顿提前到初始化阶段。
+
+     判据用 runnable 而不是「diagnostics 存在」：three.js 的 diagnostics
+     在链接成功但 info log 非空时也会挂上（那时 runnable 仍是 true），
+     拿它当失败会把一个只是话多的驱动误判成编译不过。
+     链接成功且日志干净时 diagnostics 是 **undefined**，所以默认就是通过。 */
+  try {
+    renderer.compile(quadScene, quadCamera)
+    const broken = (renderer.info.programs ?? []).some(
+      p => (p as { diagnostics?: { runnable?: boolean } }).diagnostics?.runnable === false,
+    )
+    if (broken) {
+      console.error('[sky] 着色器编译/链接失败（详见上面 three.js 的日志），走 CSS 降级')
+      return nullRenderer()
+    }
+  }
+  catch (error) {
+    // 检查本身出错不代表着色器坏了，只记一笔，继续往下走
+    console.warn('[sky] 着色器预编译检查没能完成：', error)
+  }
+
+  let frame: SkyFrame | null = null
+  let yaw = 0
+  let pitch = 0
+  let targetYaw = 0
+  let targetPitch = 0
+  let pointerX = 0
+  let pointerY = 0
+  let pointerSmoothX = 0
+  let pointerSmoothY = 0
+  /**
+   * 曝光增益。**两个变量，分工要分清**（见 GAIN_EASE_S）：
+   *   gainTarget —— 闭环控制器（probe）算出来的**目标**值，阶跃式的；
+   *   gainShown  —— 真正乘进画面的值，按 GAIN_EASE_S 向目标逼近。
+   *
+   * 分开是为了两件事同时成立：
+   *   1. 「命令」和「实测」始终对齐 —— 控制器每一步都从 **gainShown**（画面上
+   *      真正用的那个值，也就是探针量到的那个状态）出发，所以过渡期间不会
+   *      把同一份修正重复投入进去；
+   *   2. 阶跃变成 ~0.2 秒的连续过渡，切主题不再是「黑一下 + 跳回来」。
+   */
+  let gainTarget = 1
+  let gainShown = 1
+  /**
+   * 主题过渡的状态。`blendFrom` 非 null 时，渲染用的不是 `frame` 而是
+   * `mixFrame(blendFrom, frame, k)`（见 setFrame / renderFrame）。
+   */
+  let blendFrom: SkyFrame | null = null
+  let blendStart = 0
+  /**
+   * 过渡期间「曝光 × 增益」这个乘积的起点与终点。
+   *
+   * 两个 uniform 都是线性乘子，所以乘积是一个**场景无关**的量：它描述的是
+   * 「这一片水需要多少倍增益」，与曝光常数怎么分配无关。过渡期间让乘积从
+   * 当前值几何地走到终点值、再由它反解增益，好处是：
+   *   1. 亮度不会因为两个乘子各按各的节奏走而先亮一下再暗下去；
+   *   2. 终点可以取**上一个主题真正收敛到的那个乘积**（productMemory），
+   *      于是过渡结束时就落在正确曝光上，不用等闭环再爬一段。
+   * 没有记忆时（本次会话第一次切到那个主题）退回「乘积不变」，
+   * 残差交给过渡结束后的快档探测。
+   */
+  let blendProductFrom = 1
+  let blendProductTo = 1
+  /**
+   * 每个主题最近一次收敛（闭环落在滞回带内）时的「曝光 × 增益」。
+   * 换主题时用它当过渡终点 —— 见 blendProductFrom 的注释。
+   */
+  const productMemory = new Map<boolean, number>()
+  /**
+   * 最近一次**真正用于渲染**的帧。过渡中途又切了一次主题时，新的过渡要从
+   * 这里接着走 —— 从当时的 `frame`（目标）走会先把画面拉回去，看着像闪一下。
+   */
+  let renderedFrame: SkyFrame | null = null
+
+  let raf = 0
+  let running = false
+  let lastDraw = 0
+  let lastAdapt = 0
+  /**
+   * **水面自己的时钟 —— 比 `elapsed` 慢。**
+   *
+   * 这个因子只作用于波动（FFT 波场的相位推进 + 着色器里的 `uTime`），
+   * **不动**任何别的东西：曝光闭环、探针、指针视差、自适应分辨率都照旧用真实时间。
+   * 分开是为了让「水慢下来」这件事只有一个旋钮，而不会顺带把别的时序也拖慢。
+   *
+   * 为什么不直接改 `uTime` 的乘数而要单独攒一个累加器：`uTime` 同时喂给
+   * 水面着色器和 FFT 的演进 pass（`ocean.update`）。波场的形状完全来自 FFT，
+   * 着色器采样它的坐标里**没有**时间项（见 water.frag.glsl 的 waveField）——
+   * 也就是说两者的相位必须严格一致，各自乘各自的系数会让「波峰」和「焦散」错开，
+   * 出现重影。
+   */
+  let waterTime = 0
+  /** uDrops 环形缓冲的写头（addDrop 每投一个环推进一次，超过 8 后覆盖最旧的） */
+  let dropHead = 0
+  let probeCount = 0
+  let probeDue = 0
+  let slowStreak = 0
+  let firstFrameDone = false
+  /** 首帧画完了但还没翻牌（见 ready()），等第二帧再让 canvas 露出来 */
+  let pendingReady = false
+  let startedAt = 0
+  /**
+   * 热机截止时刻（首帧时间 + WARMUP_MS）。首帧之前是 Infinity，
+   * 也就是「什么时候都不算热机结束」—— 副作用是首帧自己一定不算稳态数据，
+   * 这正是要的（见 renderFrame 里 warm 的注释）。
+   */
+  let warmupUntil = Number.POSITIVE_INFINITY
+
+  /* ---- 真实性能统计 ----
+     交付帧率：数窗口内真的画了几帧，除以窗口墙钟长度。别用 1/平均间隔 ——
+     窗口里有长间隔时两者会差得离谱，而这里要的正是「这一段时间交付了多少」。 */
+  let drawnInWindow = 0
+  let windowStart = 0
+  let measuredFps = 0
+  let submitMs = 0
+  /* 刷新间隔与 vsync 计数：节流靠它们跳帧，见 draw() */
+  let refreshMs = 0
+  let lastRaf = 0
+  let rafCount = 0
+  /** resize() 算出来的、真正用的渲染比例（已被像素预算夹过） */
+  let effectiveScale = scale
+  /* GPU 计时：扩展在 Chrome 里时有时无，拿不到就一直是 null */
+  const timerExt = disjointTimer
+  let gpuQuery: WebGLQuery | null = null
+  let gpuQueryPending = false
+  let gpuMs: number | null = null
+  /** 上一次自适应做了什么决定。分辨率为什么停在那儿，只有这里说得清 */
+  let adaptNote = 'init'
+
+  let probePixels = new Uint8Array(0)
+  const samples: number[] = []
+  /** 正文带的那一份，见 probe 的注释 */
+  const textSamples: number[] = []
+  /** 单个元素框的那一份（复用同一个数组，逐个框清空重填） */
+  const rectSamples: number[] = []
+
+  /**
+   * 按 CSS 尺寸 × 自适应比例重设渲染缓冲。
+   *
+   * **刻意不依赖 `frame`**：预热（见下面 `composer.render(0)` 那一段）要在首帧
+   * 之前就把尺寸定下来，好让泛光 / tonemap 的编译发生在真实分辨率上。
+   * 帧还没来时调用它只是白算一次尺寸，画不出东西而已。
+   */
+  function resize() {
+    const rect = canvas.getBoundingClientRect()
+    const cssW = Math.max(rect.width, 1)
+    const cssH = Math.max(rect.height, 1)
+    const budget = Math.sqrt(MAX_PIXELS / (cssW * cssH))
+    const effective = Math.min(scale, Math.max(budget, minScale))
+    /* 真正用的比例要记下来：像素预算会把它压得比 scale 低（1440×900 下 0.5 → 0.435）。
+       探针里回报的必须是**这个**数 —— 那个字段就是用来描述「画面有多少像素」的，
+       报一个被预算砍掉之前的愿望值等于虚报分辨率。 */
+    effectiveScale = effective
+    const w = Math.max(2, Math.round(cssW * effective))
+    const h = Math.max(2, Math.round(cssH * effective))
+    if (canvas.width !== w || canvas.height !== h) {
+      /* canvas 的**像素尺寸就是渲染分辨率**（CSS 负责把它拉到满屏）。
+         这一点是刻意的，别改成「canvas 满分辨率 + composer 低分辨率」：
+         probe() 要 readPixels 整块画布，1440×900 是 5MB 的回读，
+         每次探测都会把 GPU 管线掐停十几毫秒；627×392 只有 983KB。
+         而且 canvas 一改尺寸 drawing buffer 就重置，所以必须带 if 守卫。 */
+      canvas.width = w
+      canvas.height = h
+      renderer.setSize(w, h, false)
+      composer.setSize(w, h)
+      // 着色器里的 uResolution 要和 gl_FragCoord 同一套坐标（渲染分辨率）
+      waterUniforms.uResolution.value.set(w, h)
+    }
+  }
+
+  /**
+   * 量一次正文区背后的真实像素亮度。**分成两条带子**：
+   *
+   *   all  —— 内容区（正文从画面 8% 一直铺到 90%，只探一个矩形必然漏掉）
+   *   text —— 只有正文的那一条：视口上部 10%~28%，也就是钟点、日期、问候。
+   *           它们没有自己的玻璃底，直接压在背景上，是唯一真正约束画面的东西。
+   *
+   * text 这条带子的上下界和 sky.ts 的 cameraPitch 是一份契约：浅色主题把俯仰定死在 19°，
+   * 于是 Snell 窗的下缘落在画面顶部往下 30%，正文带（10%~28%）整条都在窗里。
+   * 窗是画面里最平滑最亮的区域 —— 带子不跨过它和镜面的交界，量出来的 p10 才不抖。
+   * 改俯仰就要一起改这里，否则闭环会开始追噪声（实测过：跨在交界上时 p10 在 0.51~0.60 之间跳）。
+   *
+   * 一次 readPixels 覆盖两条带子，成本不变；整帧也就 15 万像素（渲染分辨率本来就低）。
+   *
+   * 用 p90 而不是 max 当「最亮」：月亮和星点是小面积高光，
+   * 让它们决定整片天的曝光是错的 —— 但它们也不该被无视，所以 max 一并回报出去。
+   */
+  function probe() {
+    if (!frame)
+      return
+
+    const w = canvas.width
+    const h = canvas.height
+    if (w < 4 || h < 4)
+      return
+
+    const size = 4 * w * h
+    if (probePixels.length !== size)
+      probePixels = new Uint8Array(size)
+
+    // 必须紧跟在 drawArrays 之后读，否则 drawing buffer 已经被合成器清掉了
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, probePixels)
+
+    // 内容区：CSS 的 y 从上往下 10%~92%，换成 GL 坐标（原点在左下）就是 8%~90%
+    const x0 = Math.floor(w * 0.06)
+    const x1 = Math.ceil(w * 0.94)
+    const y0 = Math.floor(h * 0.08)
+    const y1 = Math.ceil(h * 0.90)
+    // 正文带：CSS y 10%~28% → GL y 72%~90%
+    const ty0 = Math.floor(h * 0.72)
+    const ty1 = Math.ceil(h * 0.90)
+    const span = Math.max(1, (x1 - x0) * (y1 - y0))
+    const step = Math.max(1, Math.round(Math.sqrt(span / 4096)))
+
+    samples.length = 0
+    textSamples.length = 0
+    let sum = 0
+    for (let y = y0; y < y1; y += step) {
+      const row = y * w * 4
+      const inText = y >= ty0 && y < ty1
+      for (let x = x0; x < x1; x += step) {
+        const i = row + x * 4
+        const l = 0.2126 * linearize(probePixels[i] / 255)
+          + 0.7152 * linearize(probePixels[i + 1] / 255)
+          + 0.0722 * linearize(probePixels[i + 2] / 255)
+        samples.push(l)
+        if (inText)
+          textSamples.push(l)
+        sum += l
+      }
+    }
+    if (samples.length < 8 || textSamples.length < 8)
+      return
+
+    const quantiles = (list: number[], q: number) =>
+      list[Math.min(list.length - 1, Math.floor(list.length * q))]
+
+    /* ---- 元素级：逐个正文框量背景 ----
+       调用方给的是**视口 CSS 像素**的框，这里换成画布像素。
+       注意 GL 的原点在左下，所以 y 要翻过来：`cssH - (y + h)` 是框底在 GL 里的位置。 */
+    let elements: SkyProbe['elements'] = null
+    const rects = options.getTextRects?.() ?? []
+    if (rects.length) {
+      const cssW = Math.max(canvas.clientWidth, 1)
+      const cssH = Math.max(canvas.clientHeight, 1)
+      const sx = w / cssW
+      const sy = h / cssH
+      const low: number[] = []
+      const high: number[] = []
+      const centers: { x: number, y: number }[] = []
+      const usedRects: SkyTextRect[] = []
+      for (const r of rects) {
+        const rx0 = Math.max(0, Math.floor(r.x * sx))
+        const rx1 = Math.min(w, Math.ceil((r.x + r.w) * sx))
+        const ry0 = Math.max(0, Math.floor((cssH - (r.y + r.h)) * sy))
+        const ry1 = Math.min(h, Math.ceil((cssH - r.y) * sy))
+        if (rx1 - rx0 < 2 || ry1 - ry0 < 2)
+          continue
+        rectSamples.length = 0
+        for (let y = ry0; y < ry1; y++) {
+          const row = y * w * 4
+          for (let x = rx0; x < rx1; x++) {
+            const i = row + x * 4
+            rectSamples.push(
+              0.2126 * linearize(probePixels[i] / 255)
+              + 0.7152 * linearize(probePixels[i + 1] / 255)
+              + 0.0722 * linearize(probePixels[i + 2] / 255),
+            )
+          }
+        }
+        if (rectSamples.length < 8)
+          continue
+        rectSamples.sort((a, b) => a - b)
+        /* **试过把这里降到 p02（为了对齐「驱动量在渲染分辨率、判据在 2×」这个口径差），
+           量下来是负收益，已回退。** 依据：薄膜从 0.35 被推到 **0.44**，
+           而日落问候语并没有变好（4.71 → 4.57，差值在运行间漂移范围内）。
+           原因清楚：多出来的那层雾是**整幅宽度**的，而元素自己的渐变系数低
+           （问候语在薄膜径向渐变的边缘，实际 alpha 只有满强度的 ~0.85），
+           所以加雾并不能等比地补到那个元素头上。
+           ⇒ 结论：**靠调分位数补不了这个口径差**，该修的是驱动量的模型（见 SkyBackdrop）。 */
+        low.push(quantiles(rectSamples, 0.05))
+        high.push(quantiles(rectSamples, 0.95))
+        centers.push({ x: (r.x + r.w / 2) / cssW, y: (r.y + r.h / 2) / cssH })
+        usedRects.push(r)
+      }
+      if (low.length) {
+        elements = {
+          count: low.length,
+          low,
+          high,
+          worstLow: Math.min(...low),
+          worstHigh: Math.max(...high),
+          centers,
+          rects: usedRects,
+        }
+      }
+    }
+
+    samples.sort((a, b) => a - b)
+    textSamples.sort((a, b) => a - b)
+    const stats: SkyProbe = {
+      mean: sum / samples.length,
+      p10: quantiles(samples, 0.1),
+      p50: quantiles(samples, 0.5),
+      p90: quantiles(samples, 0.9),
+      p95: quantiles(samples, 0.95),
+      min: samples[0],
+      max: samples[samples.length - 1],
+      text: {
+        mean: textSamples.reduce((a, b) => a + b, 0) / textSamples.length,
+        p10: quantiles(textSamples, 0.1),
+        p50: quantiles(textSamples, 0.5),
+        p90: quantiles(textSamples, 0.9),
+      },
+      // 回报的是「这一帧用的」增益，不是控制器刚算出来的下一个 —— 否则对不上画面
+      gain: gainShown,
+      scale: effectiveScale,
+      scaleTarget: scale,
+      ocean: ocean?.stats ?? null,
+      elements,
+      perf: {
+        fps: measuredFps,
+        submitMs,
+        gpuMs,
+        budgetMs: 1000 / targetFps,
+        adapt: adaptNote,
+      },
+    }
+    options.onProbe?.(stats)
+
+    if (!autoExposure)
+      return
+
+    /* 过渡期间不纠正：那时量到的亮度是插值路径上的中间态，拿它去驱动力增益
+       等于自己跟自己较劲（过渡曲线会被闭环拽歪），而且还会把中间态的乘积
+       写进 productMemory。探针照常回报 —— 薄膜和外部诊断要看它。
+       过渡一结束（renderFrame 里）节奏会被重置，残差用快档收掉。 */
+    if (blendFrom)
+      return
+
+    /**
+     * 闭环曝光。**带滞回的区间调节**，每侧只盯自己怕的那一头：
+     *
+     *   浅色主题怕暗（正文是深色的，水暗下去字就糊了）→ 正文带暗过下限才抬，亮过上端才压。
+     *   深色主题怕亮（正文是浅色的，Snell 窗亮起来字就糊了）→ 整幅亮过上限才压，暗过下端才抬。
+     *
+     * 为什么不设成「对齐目标」的双边：可读性是一个**不等式**，不是一个等式。
+     * 深色字压在更亮的底上只会更好读，所以浅色主题不需要为了「正好 0.50」把画面压下去 ——
+     * 双边调节会一直把整幅画往下拉到窗带刚好等于下限为止，那时光柱和沙面全在暗部，
+     * 一天里的亮度也不再由美术层决定，而是由可读性下限决定。这正是它以前的样子：
+     * 画面被锁成一片平底。深色同理。
+     *
+     * 但「不等式」不等于「只往一边走」：没有回程的控制器就是一台棘轮，见下面 hi 的注释。
+     *
+     * 于是画面的**亮度由美术层的 exposure 决定**，闭环只负责它兜不住的时候（±2 档以内）。
+     * 稳态时 ratio 恒为 1，波纹漂过去的时候画面不会跟着呼吸。
+     *
+     * 稳态增益是**实测值、不是常数**：换成 three.js 之后探测读到的是泛光之后的像素，
+     * 整幅变亮，闭环就把 gain 收下来 —— 浅色 1.00 → 0.63，深色 3.19 → 1.27
+     * （`skyperf.mjs` 2026-06-21T12:00 两个主题各 14s）。落在死区里就是对的，
+     * 具体停在哪由「进带的那一步」决定，**不要拿 1.0 当不变量去对**。
+     *
+     * 浅色为什么只盯正文带、不盯整幅：正文只压在画面上部的那一条上（钟点、日期、问候），
+     * 别的地方暗下来不影响任何一个字。如果拿整幅的 p10 当指标，等于要求
+     * 「画面里最暗的 10% 也得亮过下限」—— 那正好否掉了「水里总得有一块够暗的地方」。
+     * 深色反过来：夜里整幅都该是暗的，而亮窗可能出现在任何位置，所以照旧看整幅。
+     *
+     * **浅色看整幅中位数，不看正文带。** 这一条是绕了三轮才走对的。
+     *
+     * 正文带（画面顶部 10%~28%）整体落在 Snell 窗里，而窗里那层菲涅耳碎丝
+     * 是**故意**画出来的（临界角附近反射率从 0.02 冲到 1.0，水面上那些破碎的银边
+     * 就是这个）。它必然把正文带一半的像素压到很底 —— 实测中位数 0.34、均值 0.51。
+     * 拿正文带的中位数当设定值，等于要求「连碎丝都得是亮的」，而增益是个全局乘数，
+     * 它抬碎丝的同时会把窗顶穿过曝。实测就是这么坏的：gain 一路爬到 2.6 还在爬，
+     * max 打到 0.99，正文带中位数只从 0.32 挪到 0.32 —— 环路在追一个美术层
+     * 根本给不出的数，于是**永远停在半路上，画面被越推越白**。
+     *
+     * 真正的教训是：闭环的设定值必须是**美术层本来就达得到的量**。
+     * 整幅中位数就是这样的量 —— 它由窗/倒影/沙三段的占比决定，
+     * 随波纹漂移只动百分之几，而且它对碎丝的覆盖率不敏感（碎丝只改变分布的方差，
+     * 不改变中位数的位置）。它管的是「这幅画整体曝光对不对」，
+     * 而这正是闭环唯一该管的事：换时刻、降级、掉帧都会改整体，闭环把它拉回来。
+     *
+     * 可读性则**完全交给薄膜**：薄膜是一条只铺在正文带上的光雾，
+     * 它把字后面那一条的 p10 抬到 0.496 的下限，而画面其余七成一点都不受影响。
+     * 拿闭环去保可读性是错的 —— 那是拿整幅画去迁就一排小字，代价就是整幅发灰。
+     *
+     * 曾经用 stats.min，那是个陷阱：画面里只要有一个角落是黑的，控制器就会要求
+     * 「每一个像素都够亮」，增益顶到上限、遮罩拉到最大，整幅画面糊成一片中性灰。
+     * 分位数让一小块极值不参与决策。
+     *
+     * 误差**必须在场景空间里算**（先 ACES 反变换再比），见 acesInv 的注释：
+     * 在显示空间里比，肩部那一段的修正量会被压缩到几乎不动。
+     */
+    /* **设定值仍取 `frame`（目标主题）。** 过渡期间闭环是停的（下面的 return），
+       所以这里不需要跟着插值帧走；等过渡结束，它面对的已经是终点画面了。 */
+    const target = acesInv(frame.targetLuminance)
+    // 两个主题现在看**同一个统计量**：整幅中位数。深色主题原来盯的是整幅 p90，
+    // 上端取 0.010（约 display 0.09）—— 那个数对这类画面是不可能达到的：深色的水
+    // 同样要有 Snell 窗，而窗本来就占了画面上部三成，p90 必然被它顶到 0.9 附近。
+    // 于是「压」的那条路永远在响，增益一路被顶到 GAIN_MIN。中位数才是「整幅曝光」。
+    const measured = acesInv(stats.p50)
+    // 滞回带的上端（浅色）／下端（深色）：README 式的「不等式」在这里落成一段区间。
+    //
+    // 为什么必须有这一段回程：只抬不压的控制器在数学上就是一台**棘轮**。
+    // 水面一直在动，正文带的统计量本来就会随焦散网漂过而上下两倍地起伏；
+    // 只要某一帧恰好落在下限以下，增益就往上跳一档，而那之后无论画面变得多亮
+    // 都没有任何机制把它拉回来。实测的后果是逐轮累积：gain 1.0 → 1.34 → 1.8（顶到
+    // 上限），整幅画被推进 ACES 肩部，纵向的明暗层次全部抹平 —— 我每改暗一次美术层，
+    // 闭环就把它抬回去一次，于是「越改越白」。
+    //
+    // 所以：越过下限才抬，越过上端才压，**带内一律不动**。比例分别按下限和上端算，
+    // 不会冲过头；带内 ratio 恒为 1，波纹漂过去时画面依然不呼吸 —— 原来的初衷保住了。
+    //
+    // 上端要落在**这个统计量真实会走到的范围里**，否则「压」的那条路永远不会触发，
+    // 棘轮就只是变慢、没有消失。两个主题看的都是整幅中位数（见 measured），
+    // 浅色在 0.30~0.62 之间走、深色在 0.07~0.35 之间走，两边的上端都落在里面。
+    // 滞回带：下限是曝光目标、上端是「再亮就开始发灰」的那条线
+    // （见 sky.ts 的 targetLuminance：浅 0.42 固定／深 0.07~0.22 跟着夜色走）。
+    // 两个数必须一起动 —— 只降目标不降上端，带子被拉宽，而闭环**在带内一律不动**，
+    // 画面会停在新旧目标之间不动，等于没改（这一版实测过一次）。
+    const hi = acesInv(frame.dark ? 0.34 : 0.56)
+    // 两个主题共用同一条滞回逻辑：低于下限才抬，高于上端才压，带内不动。
+    //
+    // 深色原来自成一套（measured > target 就压、否则抬到 hi），那样**没有带**：
+    // 它会在 0.07 和 0.34 之间来回撞，每隔几次探测整片水就呼吸一次，正是要避免的。
+    // 现在两个主题的 target 都落在 hi 之下，一条不等式就够，代码也少一半。
+    let ratio = 1
+    if (measured < target)
+      ratio = target / Math.max(measured, 1e-3)
+    else if (measured > hi)
+      ratio = hi / Math.max(measured, 1e-3)
+
+    /* 落在带子里 = 这一片水的曝光已经收敛。把「曝光 × 增益」记下来给下一次
+       切主题用（见 blendProductFrom）：那是**场景无关**的量，所以记的是它而不是
+       增益本身 —— 夜里和正午的曝光常数差几倍，记增益会记成一个只能当次用的数。 */
+    if (ratio === 1)
+      productMemory.set(frame.dark, gainShown * frame.exposure)
+    // 早期收敛快一点，之后放慢，避免波纹漂过去时整片水跟着呼吸。
+    //
+    // 收敛速度是有下限要求的：**开新标签页后的头一两秒就是第一眼**。
+    // 原来前四次探测才用 0.55 的指数、之后降到 0.16（探测间隔还是 2s），
+    // 于是一次中等偏差要十几秒才落定 —— 截图里量到的 p10 一直比目标高 0.1 就是它没走完。
+    // 第一次探测直接一步到位（指数 1），随后两次 0.7、0.45，两秒内基本收敛，
+    // 稳态时降到 0.14：那时增益已经贴着目标，只有波纹漂过带来的小抖动要压。
+    //
+    // 单步上下限收到 0.60~1.45（原来是 0.55~1.8）：一次探测最多动 ±45%。
+    // 1.8 这个上限意味着**任何一次读错的探测都能一步把画面推亮 80%**，
+    // 而且是不可逆的错觉在驱动它 —— 实测过：第一帧水面因为初相同相叠加而掀斜 37.5°，
+    // 顶部翻进镜面成了暗斑，text.p10 读到 0.16，一次探测就把增益顶到 1.8 并停在那里。
+    // 波动是暂时的，增益是永久的，所以宁可让收敛多花一两次探测。
+    // 现在是 0.7 / 0.45 两次就补回来，代价是 320ms，换的是「一次坏读数只错 45%」。
+    const rate = probeCount === 0 ? 1.0 : probeCount < 3 ? 0.7 : probeCount < 6 ? 0.45 : 0.14
+    /* 从 **gainShown**（这一帧真正用的值，也就是刚刚量到的那个状态）出发，
+       而不是从 gainTarget —— 过渡期间两者不同步，从目标出发等于把同一份
+       修正重复算一遍。稳态下两者相等，和原来的写法完全一致。 */
+    gainTarget = clamp(gainShown * clamp(ratio ** rate, 0.60, 1.45), GAIN_MIN, GAIN_MAX)
+    probeCount++
+  }
+
+  function renderFrame(now: number, dt: number) {
+    if (!frame)
+      return
+
+    waterTime += dt * WATER_TIME_SCALE
+
+    // 指针视差：极端克制，只够让天空「有厚度」
+    pointerSmoothX += (pointerX - pointerSmoothX) * 0.045
+    pointerSmoothY += (pointerY - pointerSmoothY) * 0.045
+    yaw += (targetYaw - yaw) * 0.02
+    pitch += (targetPitch - pitch) * 0.02
+
+    resize()
+
+    /* ---- 主题过渡 ----
+     * 不在过渡里时就是 `frame` 本身，一个字节的行为都没变。
+     * 在过渡里用插值帧渲染 —— 只有**渲染**用它：闭环在这段时间是停的
+     * （拿插值路径上的中间态去纠正，就是跟过渡曲线对着干），
+     * 探针的判据、`dark` 标记仍看 `frame`（目标主题）。 */
+    let f = frame
+    /** 过渡的缓动进度（0..1）；不在过渡里是 1 */
+    let blendEase = 1
+    if (blendFrom) {
+      const k = clamp((now - blendStart) / themeBlendMs, 0, 1)
+      if (k >= 1) {
+        blendFrom = null
+        /* 过渡刚结束：把收敛节奏再当一次「第一眼」，让残差（介质换掉之后
+           真实亮度与过渡终点之间的那点差）用快档收掉，而不是等 2 秒一档慢慢磨。 */
+        probeCount = 0
+        probeDue = 0
+      }
+      else {
+        // smootherstep：两端一阶导为 0，起停不顿
+        blendEase = k * k * k * (k * (k * 6 - 15) + 10)
+        f = mixFrame(blendFrom, frame, blendEase)
+        /* 过渡期间相机也由插值帧驱动。俯仰两档差 6.2°，而上面那两行 0.02 的
+           插值要 2~3 秒才走完 —— 比过渡本身还慢，会把「平滑」拖成「迟钝」。 */
+        yaw = f.cameraAzimuth
+        pitch = f.cameraPitch
+      }
+    }
+    renderedFrame = f
+
+    /* ---- 增益 ----
+     * 过渡期间：由「曝光 × 增益」的乘积反解（见 blendProductFrom），乘积本身
+     * 几何地走完这一段 —— 亮度因此只因为介质在变而变，不会因为两个乘子各按各的
+     * 节奏走而冲高或塌陷。
+     * 不在过渡里：向控制器的目标值指数逼近（见 GAIN_EASE_S）。命令仍是阶跃，
+     * 画面是连续的；`dt === 0`（首帧、renderOnce、标签页刚恢复）时直接到位，
+     * 那种情况下没有「过渡」可言，硬要点亮一个中间值反而多一帧错的画面。 */
+    if (blendFrom) {
+      const product = blendProductFrom > 0 && blendProductTo > 0
+        ? blendProductFrom * (blendProductTo / blendProductFrom) ** blendEase
+        : blendProductFrom
+      gainShown = clamp(product / Math.max(f.exposure, 1e-6), GAIN_MIN, GAIN_MAX)
+      gainTarget = gainShown
+    }
+    else {
+      gainShown += (gainTarget - gainShown) * (dt > 0 ? 1 - Math.exp(-dt / GAIN_EASE_S) : 1)
+    }
+    // uResolution 在 resize() 里设：只有画布尺寸真的变了才需要动它
+    waterUniforms.uTime.value = waterTime
+    waterUniforms.uCam.value.set(yaw + pointerSmoothX * 0.030, pitch + pointerSmoothY * 0.018)
+    waterUniforms.uExposure.value = f.exposure
+    waterUniforms.uGain.value = gainShown
+    waterUniforms.uDepth.value = f.depth
+    waterUniforms.uFloorDrop.value = f.floorDrop
+    waterUniforms.uBeamPower.value = f.beamPower
+    waterUniforms.uAmbPower.value = f.ambPower
+    waterUniforms.uCaustic.value = f.caustic
+    waterUniforms.uSurfaceGlow.value = f.surfaceGlow
+    waterUniforms.uSunDir.value.set(...dirVector(f.sunElevation, f.sunAzimuth))
+    waterUniforms.uMoonDir.value.set(...dirVector(f.moonElevation, f.moonAzimuth))
+    waterUniforms.uBeamDir.value.set(...f.beamDir)
+    waterUniforms.uAmbDir.value.set(...f.ambDir)
+    waterUniforms.uBeamTint.value.set(...f.beamTint)
+    waterUniforms.uAbsorb.value.set(...f.absorb)
+    waterUniforms.uScatterNorm.value.set(...f.scatterNorm)
+    waterUniforms.uPhaseG.value = f.phaseG
+    waterUniforms.uScatterTint.value.set(...f.scatterTint)
+    waterUniforms.uSkyAbove.value.set(...f.skyAbove)
+
+    /* FFT 海面要先算完，主着色器才采得到这一帧的水面。
+       它自带 renderer.setRenderTarget(null)，所以不会影响下面 composer 的画布绑定。 */
+    ocean?.update(waterTime)
+
+    /* 一趟 composer.render() 跑完三段：
+       水体（线性 HDR）→ 泛光 → ACES + sRGB。
+       曝光仍然乘在水体那一段，所以泛光阈值会跟着自动曝光一起动 ——
+       夜里增益拉高时会有更多东西开始发光，这在物理上是对的。 */
+    composer.render(dt)
+
+    const cost = performance.now() - startedAt
+
+    /* **热机期不喂任何性能统计。**
+     *
+     * 开页后的头一两秒里挤着一次性工作：水体着色器与三趟 FFT 程序的编译链接、
+     * 波场标定的两次阻塞回读、页面自己那批图标的取色。那几帧的 submitMs 是
+     * 500ms 量级、窗口帧率只有几 fps —— 它们描述的是「启动」，不是「稳态」。
+     *
+     * 拿它们做自适应决策的代价是实测过的（修复前）：
+     *   第 1 帧   down:cpu  0.34 → 0.272   （首帧 submit 521ms 被当成 CPU 瓶颈）
+     *   第 2 次   down:fps  0.272 → 0.218  （开页那 2 秒窗口的 fps 只有 3.4）
+     * 之后每 2 秒 ×1.12 往回爬，要 ~18 秒才回到像素预算上限 0.4355 ——
+     * 也就是「刚打开的那十几秒，水一直不是它该有的清晰度」，而且分辨率
+     * 一旦砍下去没有任何机制能立刻拉回来。慢的那几帧本来就是一次性的。
+     *
+     * 所以热机结束之前：不记 submitMs、不累计帧率窗口、也不触发自适应
+     * （lastAdapt 跟着 now 走）。热机一结束就是一段干净的新窗口，
+     * 第一次决策看到的是真实的稳态。 */
+    const warm = now >= warmupUntil
+    if (warm)
+      submitMs = submitMs ? submitMs * 0.9 + cost * 0.1 : cost
+
+    if (!warm) {
+      windowStart = 0
+      drawnInWindow = 0
+      measuredFps = 0
+      submitMs = 0
+      lastAdapt = now
+    }
+    else {
+      /* 交付帧率：累计窗口内真实绘制的帧数。
+         第一个 draw 之后才开始计时，否则开页那一帧的长耗时会被算成「帧率极低」。 */
+      drawnInWindow++
+      if (!windowStart) {
+        windowStart = now
+      }
+      else if (now - windowStart >= 2000) {
+        measuredFps = (drawnInWindow * 1000) / (now - windowStart)
+        drawnInWindow = 0
+        windowStart = now
+      }
+    }
+
+    /* GPU 计时：查询必须延迟一帧读，同一帧读会拿到未完成的结果。
+       拿不到扩展就保持 null —— 不猜。 */
+    if (timerExt) {
+      if (gpuQueryPending && gpuQuery) {
+        const disjoint = gl.getParameter(timerExt.GPU_DISJOINT_EXT)
+        const done = gl.getQueryParameter(gpuQuery, gl.QUERY_RESULT_AVAILABLE)
+        if (done) {
+          if (!disjoint) {
+            const ns = gl.getQueryParameter(gpuQuery, gl.QUERY_RESULT) as number
+            /* 软件光栅化（headless 的 SwiftShader）会拿得到扩展但**恒返回 0**。
+               那是一个看着很漂亮的假数，宁可不报。
+               判据不能写成 `ns > 0`：实测这套代码在 SwiftShader 上**大部分帧返回 0、
+               偶尔返回一个 0 附近的伪值**，于是「连续两次为 0 才置空」会漏掉第一帧，
+               日志里就混进 0.00 —— 一个 627×392 的光线步进不可能只花 0 毫秒，
+               那不是「很快」，那是没测到。所以门槛按**物理下限**取：
+               一次正经的 GPU 框至少得有几十微秒，低于 0.05ms 一律当没测到，
+               立刻回到 null（不留 streak 窗口）。 */
+            const ms = ns / 1e6
+            if (ms >= 0.05) {
+              gpuMs = gpuMs === null ? ms : gpuMs * 0.8 + ms * 0.2
+            }
+            else {
+              gpuMs = null
+            }
+          }
+          gl.deleteQuery(gpuQuery)
+          gpuQuery = null
+          gpuQueryPending = false
+        }
+      }
+      else if (!gpuQuery) {
+        gpuQuery = gl.createQuery()
+        if (gpuQuery) {
+          gl.beginQuery(timerExt.TIME_ELAPSED_EXT, gpuQuery)
+          gl.endQuery(timerExt.TIME_ELAPSED_EXT)
+          gpuQueryPending = true
+        }
+      }
+    }
+
+    if (!firstFrameDone) {
+      firstFrameDone = true
+      warmupUntil = now + WARMUP_MS
+      pendingReady = true
+    }
+    else {
+      ready()
+    }
+
+    /* 自适应分辨率：掉帧就降，富余就升。每 2 秒最多动一次，避免来回抖。
+     *
+     * **主信号是交付帧率，不是提交耗时。** 提交耗时（submitMs）只cover 了 CPU 把命令
+     * 塞进 GL 队列的时间，GPU 那边慢不慢它一点都不知道；而交付帧率会把 GPU 反压算进来。
+     * 两者都要看，但分工不同：
+     *   - 交付帧率低于目标 → 这台机器交付不出来，降分辨率（降分辨率同时减轻 CPU 和 GPU）；
+     *   - 交付帧率达标但提交耗时超预算 → 主线程被别的东西占着，降分辨率也有帮助；
+     *   - 都富余才升。
+     * 原来只看提交耗时，在小缓冲上它恒等于「闲」，于是分辨率一路涨到上限 —— 尺子坏了，
+     * 读数再好看也不算证据。 */
+    if (now - lastAdapt > 2000) {
+      lastAdapt = now
+      const budgetMs = 1000 / targetFps
+      // 交付帧率要留 15% 的宽容：窗口边界和 rAF 抖动会让它天然略低于目标
+      const starving = measuredFps > 0 && measuredFps < targetFps * 0.85
+      const cpuBound = submitMs > budgetMs * 0.45
+      const healthy = measuredFps >= targetFps * 0.97 && submitMs < budgetMs * 0.25
+
+      if ((starving || cpuBound) && scale > minScale) {
+        scale = Math.max(minScale, scale * 0.8)
+        slowStreak = 0
+        adaptNote = starving ? 'down:fps' : 'down:cpu'
+      }
+      else if (healthy && scale < maxScale) {
+        scale = Math.min(maxScale, scale * 1.12)
+        slowStreak = 0
+        adaptNote = 'up'
+      }
+      else if (starving && scale <= minScale) {
+        // 已经降到最低分辨率还是交付不出来 —— 这台机器吃不下这片天，交给 CSS 兜底
+        if (++slowStreak >= 3) {
+          slowStreak = 0
+          console.warn(`[sky] 最低分辨率下仍只有 ${measuredFps.toFixed(1)}fps（目标 ${targetFps}），降级到 CSS 背景`)
+          options.onTooSlow?.()
+        }
+        adaptNote = 'down:floor'
+      }
+      else {
+        slowStreak = 0
+        adaptNote = scale >= maxScale ? 'hold:max' : 'hold:band'
+      }
+    }
+
+    // 亮度探针：刚打开时密一点，让曝光几帧内就收敛；之后降频。
+    // 密集段要盖满上面的收敛表（前 6 次），否则第 5、6 次会掉到 2s 一档，收敛尾巴拖到 5s 之后。
+    const interval = probeCount < 6 ? 320 : 2000
+    if (options.onProbe && now - probeDue > interval) {
+      probeDue = now
+      probe()
+    }
+  }
+
+  function draw(now: number) {
+    raf = requestAnimationFrame(draw)
+    if (!running || !frame)
+      return
+
+    /* 节流要**按显示器的刷新节奏跳帧，不能拿墙钟间隔去比**。
+     *
+     * 原来这里是 `if (now - lastDraw < 1000 / targetFps - 1) return`，而 rAF 的间隔
+     * 是跟着刷新率走的。于是出现一个很隐蔽的半速 bug：在 30Hz 的显示器上（headless
+     * 的 SwiftShader 就是 32Hz，实测 rAF 间隔 p50 = 31.2ms），判定阈值是 32.3ms，
+     * 每一次回调都**差一点点不够**，于是一律跳过、下一次才画 —— 交付帧率正好是
+     * 显示器帧率的一半，16fps。60Hz 上不会暴露，只有刷新率接近或低于目标时才现形。
+     *
+     * 现在的做法是量出刷新间隔，算出「每几个 vsync 画一帧」，按回调计数跳。
+     * 60Hz → 每 2 个画一次 = 30fps；32Hz → 每个都画 = 32fps（本来就是它给得最快的）。
+     * 这样交付帧率永远是刷新率能支持的最好值，而不是被一个固定阈值腰斩。 */
+    refreshMs = refreshMs ? refreshMs * 0.9 + (now - lastRaf) * 0.1 : 32
+    lastRaf = now
+    const stride = Math.max(1, Math.round((1000 / targetFps) / refreshMs))
+    if (++rafCount % stride !== 0)
+      return
+
+    const dt = lastDraw ? Math.min((now - lastDraw) / 1000, 0.1) : 0
+    lastDraw = now
+    startedAt = performance.now()
+    renderFrame(now, dt)
+  }
+
+  function handleContextLost(event: Event) {
+    event.preventDefault()
+    running = false
+    console.warn('[sky] WebGL 上下文丢失，先停下，等浏览器恢复')
+  }
+
+  /**
+   * 通知调用方「画面可以露出来了」（SkyBackdrop 收到就把 canvas 淡入）。
+   *
+   * **刻意晚一帧。** 第一帧是整条管线第一次真正跑起来：驱动内部状态、纹理上传、
+   * 以及紧随其后的 `gl.readPixels`（探针）同步 —— 实测它自己就要 ~100ms，
+   * 冷启动更多。而淡入是从 `onReady` 那一刻开始的：按第一帧翻牌，
+   * 这 100ms 正好落在「水刚出现」的瞬间，看起来就是开页那一下顿。
+   * 让它先花在还全透明的那一帧上，第二帧才开始淡入：
+   * 用户看到的第一眼水就已经是稳的，代价只有 16ms。
+   */
+  function ready() {
+    if (!pendingReady)
+      return
+    pendingReady = false
+    options.onReady?.()
+  }
+
+  canvas.addEventListener('webglcontextlost', handleContextLost)
+
+  /* ---- 预热：把泛光 / tonemap 的程序也提前编掉 ----
+   *
+   * `renderer.compile(quadScene, quadCamera)` 只编**场景里的材质**，也就是水体那一个。
+   * 而 EffectComposer 的三个 pass —— 水体、UnrealBloom（它自己有好几个 program）、
+   * 最终 tonemap —— 是在**首帧 `composer.render()` 里才逐个编译**的。
+   *
+   * 实测（RTX 5060）：那一帧 submit **521ms**，而它正好落在 canvas 淡入的那一刻
+   * （`painted` 就是在这帧之后翻的）—— 用户看到的就是「水刚出现就很卡，
+   * 过一会儿才好」。开页后的前 0.6 秒里只有 2 帧、其中一帧 500ms，就是它。
+   *
+   * 所以这里先空跑一趟完整管线，把编译挪到「画面还全透明」的时候：
+   * canvas 的 opacity 是 0（要等 `painted`），尺寸也已经按真实视口定好。
+   * 此时还没有 SkyFrame，但预热要的只是尺寸与程序，不需要天文参数 ——
+   * 着色器里那些 uniform 保持初值即可。
+   */
+  resize()
+  composer.render(0)
+
+  function setFrame(next: SkyFrame) {
+    const first = !frame
+    /* 主题切换 = **换了一片水**：浅色浮在 2m 浅水、深色沉在 30m 深水，
+       连曝光常数都差一个量级（同一时刻 3.96 vs 0.75）。而 `gain` 是**有状态**的，
+       切换后它仍然是上一个主题收敛出来的值 —— 实测（RTX 5060，23:45 实景）：
+         浅→深  切换后 1.5s 整幅 `p50` 掉到 **0.003**（几乎全黑，看不见水），
+                增益从 0.41 爬到上限 4 花了 **27 秒**；
+         深→浅  切换后 1.5s `p50` 冲到 **0.998**（整幅过曝发白），
+                27 秒后还在往下压（0.60，仍未进带）。
+       原因是闭环的快收敛只挂在「开页后的前 6 次探测」上（rate 1.0/0.7/0.45、
+       每 320ms 一次），稳态是 rate 0.14、每 2s 一次 —— 让 0.14 去追 10 倍的
+       曝光差，就是几十秒。**开页第一眼被照顾到了，切主题这一眼没有。**
+       所以主题一变就把收敛节奏当「第一眼」重来：立刻探一次（probeDue = 0）、
+       回到快档（probeCount = 0）。另外把增益**解析预置**到新主题的量级上
+       （见下面 exposureRatio）—— 光是重来节奏还剩下 ~1 秒的错曝光窗口，
+       预置把它压到「第一帧就基本对」。 */
+    const prev = frame
+    const themeChanged = prev !== null && prev.dark !== next.dark
+    frame = next
+    targetYaw = next.cameraAzimuth
+    targetPitch = next.cameraPitch
+    if (first || themeChanged) {
+      /* 首帧与主题切换都把相机**直接放到位**。
+         这两件事都是「换了一片水」，不是指针漂移；而 pitch 的插值系数只有 0.02
+         （30fps 下时间常数 1.7s，浅深两档又差 6.2°），慢慢摇过去会让曝光闭环
+         在**还没到位的构图**上量亮度。 */
+      yaw = targetYaw
+      pitch = targetPitch
+    }
+    if (themeChanged && prev) {
+      /* 解析预置：water.frag.glsl 最后一行是 `col *= uExposure * uGain` ——
+         两个 uniform 都是**线性乘子**，所以「曝光小了多少倍，增益就该大多少倍」
+         是能直接算的，不必等闭环去追。浅→深时曝光 3.96 → 0.75（暗 5.3 倍），
+         增益就乘 5.3：**第一帧就落在正确量级附近**（原来第一帧还带着上一个主题
+         的增益，整幅 p50 0.003，几乎全黑）。
+         剩下的偏差来自介质本身（2m 浅水换成 30m 深水，以及两档目标亮度的差异），
+         没有解析式，交给快档闭环在 ~1 秒内收掉 —— 而 gainShown 的 0.2 秒过渡
+         把这一步也变成连续的。 */
+      const exposureRatio = next.exposure > 1e-6 ? prev.exposure / next.exposure : 1
+      /* 从 gainShown（画面上真正用的值）出发，不是从 gainTarget：过渡期间两者
+         不同步，从目标出发会把已经投入的修正再算一遍。 */
+      gainTarget = clamp(gainShown * exposureRatio, GAIN_MIN, GAIN_MAX)
+      probeCount = 0
+      probeDue = 0
+      /* 参数过渡：把「一次换掉」摊成 THEME_BLEND_MS 一段（见 mixFrame）。
+         起点取 renderedFrame（上次真正画出来的那一帧），连续快切才不会跳。 */
+      if (themeBlendMs > 0) {
+        blendFrom = renderedFrame ?? prev
+        blendStart = performance.now()
+        blendProductFrom = gainShown * Math.max(blendFrom.exposure, 1e-6)
+        blendProductTo = productMemory.get(next.dark) ?? blendProductFrom
+      }
+    }
+  }
+
+  return {
+    supported: true,
+    setFrame,
+    setPointer(nx: number, ny: number) {
+      pointerX = nx
+      pointerY = ny
+    },
+    addDrop(nx: number, ny: number) {
+      if (!frame)
+        return
+      /* 和着色器的 rayDir 同一套几何（见 water.frag.glsl）：
+         uv 以半高归一，先转俯仰再转方位。屏幕点 (nx, ny∈从上数) 换成
+         GL 坐标（原点在左下）就是 fragCoord = (nx·w, (1−ny)·h)。 */
+      const w = canvas.width
+      const h = canvas.height
+      if (w < 4 || h < 4)
+        return
+      const uvx = (nx - 0.5) * (w / h)
+      const uvy = 0.5 - ny
+      const tanHalf = Math.tan((FOV_Y * Math.PI) / 360)
+      let dx = uvx
+      let dy = uvy
+      let dz = 0.5 / tanHalf
+      // rotateX(-pitch)
+      const cp = Math.cos(-pitch)
+      const sp = Math.sin(-pitch)
+      const y1 = cp * dy - sp * dz
+      const z1 = sp * dy + cp * dz
+      dy = y1
+      dz = z1
+      // rotateY(yaw)
+      const cy = Math.cos(yaw)
+      const sy = Math.sin(yaw)
+      const x2 = cy * dx + sy * dz
+      const z2 = -sy * dx + cy * dz
+      dx = x2
+      dz = z2
+      const len = Math.hypot(dx, dy, dz)
+      dx /= len
+      dy /= len
+      dz /= len
+      /* 涟漪落在水面（y = 0）上的哪一点：
+       *   - 视线朝上（dy > 0）：直接和水面求交，t = depth/dy；
+       *   - 视线朝下（dy < 0）：它在几何上打不到水面，但「点沙底」这件事照样该有水花。
+       *     扰动从深处传上去，水面上「正对着那个沙点」的位置起环。
+       *
+       *     注意这里的 xz 不是沙点本身的 xz，而要**沿光的来向退回去**：
+       *     沙上某点的焦散来自水面上游的那一点（seaFloor 里 q = p.xz − beamDir.xz·beamLen），
+       *     所以要让环出现在手指底下，落点得放在 q 上。少了这一步，
+       *     环会整块被光路推偏几米 —— 实测沙区只有 1.63 倍的响应，一半是因为它跑出了取景框。
+       */
+      let t: number
+      let px: number
+      let pz: number
+      if (dy > 0.02) {
+        t = frame.depth / dy
+        px = dx * t
+        pz = dz * t
+      }
+      else if (dy < -0.02 && frame.floorDrop > 0) {
+        t = frame.floorDrop / -dy
+        const sy = -frame.depth + dy * t // 沙面交点的 y（负值）
+        const beamY = Math.min(frame.beamDir[1], -1e-3)
+        const beamLen = sy / beamY // > 0：光从水面走到沙点那一段
+        px = dx * t - frame.beamDir[0] * beamLen
+        pz = dz * t - frame.beamDir[2] * beamLen
+      }
+      else {
+        return
+      }
+      // 超出波场平铺尺度太远的点，涟漪在着色器里也会被距离淡出，直接丢
+      if (Math.hypot(px, pz) > 40)
+        return
+      const slot = dropHead % 8
+      dropHead++
+      const v = (waterUniforms.uDrops.value as THREE.Vector4[])[slot]
+      /* w 是**相对振幅**（1 = 标准强度）：环的绝对尺度是着色器里的 DROP_AMP ——
+         它是「画面尺度」的事，和点击位置无关，留在 GLSL 里只用改一处。 */
+      v.set(px, pz, waterTime, 1)
+      waterUniforms.uDropCount.value = Math.min(dropHead, 8)
+    },
+    start() {
+      if (running)
+        return
+      running = true
+      lastDraw = 0
+      probeDue = 0
+      raf = requestAnimationFrame(draw)
+    },
+    stop() {
+      running = false
+      if (raf)
+        cancelAnimationFrame(raf)
+      raf = 0
+    },
+    renderOnce() {
+      if (!frame)
+        return
+      startedAt = performance.now()
+      renderFrame(performance.now(), 0)
+      /* 只画一帧（prefers-reduced-motion）时没有第二帧，这里补上那次翻牌，
+         否则 canvas 会一直停在 opacity:0。 */
+      ready()
+    },
+    dispose() {
+      running = false
+      if (raf)
+        cancelAnimationFrame(raf)
+      raf = 0
+      canvas.removeEventListener('webglcontextlost', handleContextLost)
+      /* 交给 three.js 回收：program、render target、几何体、材质它自己都记着账。
+         手动 deleteProgram 反而会和它的程序缓存对不上（缓存里仍留着那条记录，
+         万一这个 canvas 又被复用就会拿到一个已删除的 program）。 */
+      quad.geometry.dispose()
+      waterMaterial.dispose()
+      ocean?.dispose()
+      flatOcean?.dispose()
+      composer.dispose()
+      renderer.dispose()
+      gl.getExtension('WEBGL_lose_context')?.loseContext()
+    },
+  }
+}
+
+/** 高度角 / 方位角 → 世界坐标方向向量（X = 东，Y = 天顶，Z = 北） */
+export function dirVector(elevation: number, azimuth: number): [number, number, number] {
+  const cosEl = Math.cos(elevation)
+  return [cosEl * Math.sin(azimuth), Math.sin(elevation), cosEl * Math.cos(azimuth)]
+}
+
+function clamp(x: number, lo: number, hi: number) {
+  return x < lo ? lo : x > hi ? hi : x
+}
+
+/** sRGB 通道值 → 线性亮度分量 */
+function linearize(v: number): number {
+  return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4
+}

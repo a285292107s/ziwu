@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import SkyBackdrop from '~/components/SkyBackdrop.vue'
 import { paletteFor, phaseForHour } from '~/logic/ambience'
+import { parseSkyOverride } from '~/logic/sky'
 import { useShortcuts } from '~/composables/useShortcuts'
 import { useTheme } from '~/composables/useTheme'
 import { PRESET_SITES } from '~/logic/presetSites'
@@ -9,15 +11,27 @@ import { greeting, presetSitesMerged, presetSitesMergedReady, shortcutsReady } f
 const { isDark, setTheme } = useTheme()
 const { importSites } = useShortcuts()
 
+/* ---------------- 评审用的时间覆盖 ----------------
+   `?sky=6.5` 把整页钉在今天 06:30。连时钟一起钉住是故意的：
+   截图评审要的是「这一页在清晨六点半长什么样」，
+   钟面上写着真实的凌晨一点、天上却是清晨，那张图没法看。
+   没有这个参数时一切照旧，一秒一跳。 */
+const skyOverride = parseSkyOverride(window.location.search)
+
 /* ---------------- 时钟 ----------------
    钟点与分钟是主角，秒单独降级成一个小号数字：
    每秒刷新的元素越少、字号越小，视线就越不会被秒针拽走，
    同时仍然是「活着的」时钟而不是一张静态图。 */
-const now = ref(new Date())
-const timer = window.setInterval(() => {
-  now.value = new Date()
-}, 1000)
-onUnmounted(() => window.clearInterval(timer))
+const now = ref(skyOverride ?? new Date())
+const timer = skyOverride
+  ? 0
+  : window.setInterval(() => {
+    now.value = new Date()
+  }, 1000)
+onUnmounted(() => {
+  if (timer)
+    window.clearInterval(timer)
+})
 
 const pad = (n: number) => String(n).padStart(2, '0')
 
@@ -72,12 +86,13 @@ onMounted(async () => {
     :style="backdropStyle"
     :data-phase="phase"
   >
-    <!-- 氛围层：底色渐变 + 两团柔光 + 暗角。纯装饰，不承载任何信息 -->
-    <div class="ambience" aria-hidden="true">
-      <div class="ambience__glow ambience__glow--top" />
-      <div class="ambience__glow ambience__glow--side" />
-      <div class="ambience__vignette" />
-    </div>
+    <!-- 天光背景层：WebGL2 大气散射，带 CSS 兜底与可读性薄膜。
+         纯装饰，不承载任何信息。 -->
+    <SkyBackdrop :dark="isDark" :override="skyOverride" />
+
+    <!-- 暗角：把视线收向版心，同时让四周的玻璃元素有「退后」的层次。
+         天空本身不带暗角 —— 那是镜头的事，不是大气的事。 -->
+    <div class="vignette" aria-hidden="true" />
 
     <!-- 胶片颗粒：给玻璃材质一个「实体表面」，避免大面积渐变显得像石膏 -->
     <div class="grain" aria-hidden="true" />
@@ -194,43 +209,19 @@ onMounted(async () => {
   user-select: none;
 }
 
-/* ---- 氛围层 ---- */
-.ambience {
-  position: absolute;
+/* ---- 暗角 ----
+   压得很轻：天空已经有自己的明暗结构了，暗角只负责把四角收一收，
+   让玻璃控件有「退后」的层次。压重了会把天光变成一口井。 */
+.vignette {
+  /* 和 .sky 一样钉在视口上。它是压在天空上的可读性层，暗角中心必须落在
+     **人看得到的那一帧**的中心；跟着文档长到 1096 高的话，暗角中心会掉到
+     滚动区中心，可见部分的四角压暗就不对称了。 */
+  position: fixed;
   inset: 0;
   z-index: var(--z-ambience);
   pointer-events: none;
-}
-
-.ambience__glow {
-  position: absolute;
-  border-radius: 50%;
-  background: var(--amb-glow);
-  filter: blur(72px);
-}
-
-.ambience__glow--top {
-  width: min(64rem, 96vw);
-  height: 30rem;
-  top: -15rem;
-  left: 50%;
-  transform: translateX(-50%);
-}
-
-.ambience__glow--side {
-  width: 34rem;
-  height: 26rem;
-  right: -10rem;
-  bottom: -12rem;
-  opacity: 0.7;
-}
-
-/* 暗角：把视线收向版心，同时让四周的玻璃元素有「退后」的层次 */
-.ambience__vignette {
-  position: absolute;
-  inset: 0;
-  background: radial-gradient(120% 90% at 50% 34%, transparent 42%, var(--bg-deep) 130%);
-  opacity: 0.7;
+  background: radial-gradient(128% 96% at 50% 38%, transparent 46%, var(--bg-deep) 132%);
+  opacity: 0.5;
 }
 
 /* ---- 胶片颗粒 ----

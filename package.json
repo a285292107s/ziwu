@@ -26,6 +26,9 @@
     "postinstall": "simple-git-hooks",
     "typecheck": "tsc --noEmit"
   },
+  "dependencies": {
+    "three": "^0.186.1"
+  },
   "devDependencies": {
     "@antfu/eslint-config": "^2.27.0",
     "@ffflorian/jszip-cli": "^3.8.5",
@@ -33,6 +36,7 @@
     "@playwright/test": "^1.46.1",
     "@types/fs-extra": "^11.0.4",
     "@types/node": "^22.5.0",
+    "@types/three": "^0.186.0",
     "@types/webextension-polyfill": "^0.12.0",
     "@typescript-eslint/eslint-plugin": "^8.2.0",
     "@unocss/reset": "^0.62.2",
