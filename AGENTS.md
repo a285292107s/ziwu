@@ -40,6 +40,10 @@ pnpm build                                # 生产构建
 node scripts/rebuild.mjs                  # 生产构建入口（清空 → web → prepare → background）
 node scripts/rebuild.mjs scripts/contrast-audit.mjs   # 构建完接着跑指定脚本
 
+# 交互行为验证（会真的点、真的拖，断言跳转与落盘结果）
+node --no-experimental-require-module scripts/verify-tile-click.mjs
+
+# 视觉评审截图 → docs/review/<轮次>/
 node --no-experimental-require-module scripts/preview.mjs <轮次>   # 新标签页整屏截图
 node --no-experimental-require-module scripts/shots.mjs   <轮次>   # 各状态 × 明暗主题截图
 node --no-experimental-require-module scripts/states.mjs  <轮次>   # 交互状态截图
@@ -47,6 +51,9 @@ node --no-experimental-require-module scripts/contrast-audit.mjs   # WCAG 对比
 ```
 
 产物统一落在 `docs/review/<轮次>/`。
+
+> 截图与审计脚本都要求 `extension/` 是**生产产物**（它们直接加载 `extension/`）。
+> 刚跑过 `pnpm dev` 的话先 `node scripts/rebuild.mjs`。
 
 ### 两个必须知道的坑
 

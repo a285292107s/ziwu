@@ -16,7 +16,7 @@ import type { Shortcut } from '~/logic/shortcuts'
  * 默认 false（同标签页），与新标签页上的搜索框保持一致。
  * 设置页 / 侧边栏传 true：那里同标签页跳转会把界面自己顶掉。
  */
-withDefaults(defineProps<{ openInNewTab?: boolean }>(), {
+const props = withDefaults(defineProps<{ openInNewTab?: boolean }>(), {
   openInNewTab: false,
 })
 
@@ -397,13 +397,13 @@ function onTilePointerDown(index: number, event: PointerEvent) {
     )
   }
 
-  // 指针捕获：手指/鼠标滑出这一格甚至滑出窗口，事件也还能收回来
-  try {
-    cell.setPointerCapture(event.pointerId)
-  }
-  catch {
-    // 少数环境不支持捕获，退化成普通事件冒泡也能用
-  }
+  /* 这里**刻意不捕获指针**，捕获挪到了 armDrag()。
+     原因：`setPointerCapture` 会把这次手势随后的 mouseup / click 一并
+     重定向到被捕获的那个格子（li）上，而磁贴是个 `<a>` ——
+     click 的 target 于是变成 li，链接默认行为从不触发，
+     「点图标打不开站点」就是这么来的（实测 click target=LI.tile-cell，
+     而且事后释放捕获也救不回来：mouseup 的目标在派发时就定了）。
+     只在真的开始拖之后再捕获，普通点击就完全不受影响。 */
 
   window.addEventListener('pointermove', onPointerMove)
   window.addEventListener('pointerup', onPointerUp)
@@ -436,6 +436,17 @@ function armDrag() {
   document.documentElement.style.userSelect = 'none'
   // CSS 的 touch-action 在手势开始后改就来不及了，只能自己拦 touchmove
   window.addEventListener('touchmove', blockPageScroll, { passive: false })
+
+  /* 指针捕获放在这里，而不是 pointerdown（见 onTilePointerDown 的说明）：
+     真的开拖之后，手指/鼠标滑出这一格、甚至滑出窗口，事件也还能收回来。
+     代价是这次手势的 mouseup / click 会被重定向到格子上 ——
+     所以 onPointerUp 里对「arm 过但没挪窝」的那次点击做了补偿。 */
+  try {
+    active.cell.setPointerCapture(active.pointerId)
+  }
+  catch {
+    // 少数环境不支持捕获（或指针已经失效），退化成普通事件冒泡也能用
+  }
 
   mountGhost(active)
   haptic()
@@ -761,6 +772,24 @@ function playFlip(before: Map<string, DOMRect>) {
   })
 }
 
+/**
+ * 打开一个磁贴指向的站点。
+ *
+ * 只在「指针捕获吃掉了那次点击」时才用得上（见 onPointerUp）：
+ * 普通点击由磁贴自己的 `<a href>` 走浏览器原生行为，不需要经过这里。
+ * 打开方式跟链接保持一致：默认同标签页；`openInNewTab`
+ * （设置页 / 侧边栏）或按住 Ctrl/⌘ 时开新标签页。
+ */
+function activateTile(shortcut: Shortcut, event: PointerEvent) {
+  const newTab = props.openInNewTab || event.ctrlKey || event.metaKey
+  if (newTab) {
+    window.open(shortcut.url, '_blank', 'noopener')
+    return
+  }
+
+  window.location.href = shortcut.url
+}
+
 function onPointerUp(event: PointerEvent) {
   const active = session
   if (!active || event.pointerId !== active.pointerId)
@@ -780,8 +809,18 @@ function onPointerUp(event: PointerEvent) {
 
   endDrag()
 
-  if (!dragged)
+  if (!dragged) {
+    /* arm 起来过、但一直没挪窝、也没按到 LONG_HOLD_MS —— 按设计这就是一次
+       「慢点击」，该照常打开站点。但指针捕获已经把这次 click 重定向到了格子上，
+       链接收不到它，所以在这里手工补一次（语义对齐 `<a>`：默认同标签页，
+       Ctrl/⌘ 开新标签页；中键在 pointerdown 就被挡掉了，走的是原生 auxclick）。 */
+    if (armed && !moved) {
+      const shortcut = list.value.find(item => item.id === itemId)
+      if (shortcut)
+        activateTile(shortcut, event)
+    }
     return
+  }
 
   // 真的拖过：这一格紧跟着的那次 click 不算「点击」，别顺手打开站点。
   // 只挡它自己 —— 用户拖完马上点别的图标是正常的，不能一起吞掉。
@@ -1121,21 +1160,30 @@ watch(list, (value) => {
       {{ announcement }}
     </p>
 
-    <!-- 撤销删除 -->
-    <Transition name="toast">
-      <div
-        v-if="pendingRemoval"
-        class="toast focus-ring"
-        role="status"
-        aria-live="polite"
-        data-test="undo-toast"
-      >
-        <span class="truncate">已删除「{{ pendingRemoval.shortcut.name }}」</span>
-        <button type="button" class="toast-undo" data-test="undo-remove" @click="undoRemoval">
-          撤销
-        </button>
-      </div>
-    </Transition>
+    <!-- 撤销删除。
+         必须 Teleport 到 body：.toast 是 position:fixed，而它原本所在的
+         .grid-root 挂着 `animation: rise-in ... both`——fill-forwards 的 transform
+         动画会一直让这个元素充当 fixed 后代的包含块（NewTab.vue 里那条注释
+         说的「动画结束后依然保留 transform 的已结束状态」就是这个），
+         于是浮层被钉在磁贴带的底部，而不是视口底部。
+         设置页 / 侧边栏复用这个组件时，宿主容器同样可能带 transform，
+         挂在 body 上一劳永逸。 -->
+    <Teleport to="body">
+      <Transition name="toast">
+        <div
+          v-if="pendingRemoval"
+          class="toast focus-ring"
+          role="status"
+          aria-live="polite"
+          data-test="undo-toast"
+        >
+          <span class="truncate">已删除「{{ pendingRemoval.shortcut.name }}」</span>
+          <button type="button" class="toast-undo" data-test="undo-remove" @click="undoRemoval">
+            撤销
+          </button>
+        </div>
+      </Transition>
+    </Teleport>
 
     <!-- 新增 / 编辑对话框 -->
     <Teleport to="body">

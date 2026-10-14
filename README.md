@@ -203,6 +203,18 @@ Vue 的 scoped 编译器会把 `:global(.dark) .foo` 处理成**裸的 `.dark { 
 
 `node scripts/contrast-audit.mjs` 按「界面 × 主题」分组跑，任何一项不达标**或选择器找不到元素**都返回退出码 1。它还会等 `document.getAnimations()` 落定再量——入场动画期间元素带着 `opacity < 1`，量到的是「动画到一半的样子」，会把达标的地方误判成 FAIL。
 
+### 指针捕获会把链接的 click 一起吃掉
+
+`setPointerCapture()` 之后，这一次手势随后的 **mouseup / click 也会被重定向到被捕获的那个元素**。
+磁贴的格子是 `<li>`、里面的图标才是 `<a>`，所以只要在 `pointerdown` 里捕获指针，
+click 的 target 就变成 `li`，链接的默认行为从不触发 —— 点图标毫无反应，控制台也不报错。
+事后在 `pointerup` 里 `releasePointerCapture()` **救不回来**：兼容鼠标事件的目标在派发时就定了。
+
+所以 `ShortcutGrid` 只在 `armDrag()`（真的开始拖）之后才捕获，普通点击完全不碰它；
+「按住但没挪窝」那一次点击则由 `activateTile()` 手工补上。
+改动这块手势逻辑后，务必真机点一遍磁贴（`node scripts/verify-tile-click.mjs` 会跑普通点击 /
+慢点击 / 长按 / 拖动 / Ctrl+点击 / 键盘 / 触屏 / 设置页八条路径）。
+
 ### 事件类型不匹配 `tsc` 抓不到
 
 `tsc --noEmit` 不检查 `.vue` 模板里的组件事件签名，需要 `vue-tsc`。曾经有一个「删除按钮点了没反应」的 bug：磁贴 emit 的是 `shortcut.id`（字符串），父组件却读 `shortcut.id`，`findIndex` 返回 -1 后**静默 return**，`tsc` 全绿。改动组件 emit/props 后，**手动点一遍对应交互**（新标签页和设置页都要过，它们复用同一批组件）。
