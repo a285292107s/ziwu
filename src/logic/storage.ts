@@ -58,16 +58,3 @@ export const { data: themeMode, dataReady: themeModeReady } = useWebExtensionSto
   'meridiem-theme',
   initialThemeMode(),
 )
-
-/**
- * 「iTab 预置站点已并入」标记（一次性）。
- *
- * `defaultShortcuts()` 只对**没有 meridiem-shortcuts 键**的实例生效，
- * 而已经用过一段时间的实例 storage 里已经有值，默认值永远补不进去。
- * 所以新标签页首次加载时按这个标记做一次合并（`importSites` 按网址去重），
- * 然后把标记置为 true —— 之后用户再删掉的站点不会被复活。
- */
-export const { data: presetSitesMerged, dataReady: presetSitesMergedReady } = useWebExtensionStorage<boolean>(
-  'meridiem-preset-sites-merged',
-  false,
-)

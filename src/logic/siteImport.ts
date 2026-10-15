@@ -1,8 +1,9 @@
 /**
  * 把 iTab 备份（`navConfig`）里的站点提取成子午 Meridiem 的磁贴数据。
  *
- * 纯函数，不碰 storage / Vue：设置页的「粘贴配置导入」与
- * `presetSites.ts` 的内置清单共用同一套规则。
+ * 纯函数，不碰 storage / Vue：设置页的「粘贴配置导入」用它把用户自己贴进来的
+ * iTab 备份转成磁贴数据。这条路径是个人站点进入本机的**唯一**入口 ——
+ * 站点写进 `browser.storage.local`，不进源码、不进构建产物。
  *
  * 规则只有三条：
  * 1. 只认 https / http（`normalizeUrl` 负责补协议、挡掉 `itab://add` 这类内部地址）；

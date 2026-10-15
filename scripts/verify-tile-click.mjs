@@ -49,14 +49,16 @@ if (!sw)
 const extensionId = sw.url().split('/')[2]
 const newtabUrl = `chrome-extension://${extensionId}/dist/newtab/index.html`
 
-/** 直接在后台里写 storage，避开页面首屏那次「并入预置站点」的竞态 */
+/**
+ * 直接在后台里写 storage。
+ *
+ * 新标签页已经**不再**做「并入预置站点」的合并动作，所以这里只要把
+ * `meridiem-shortcuts` 写好即可：键存在时首屏不会再用种子覆盖它。
+ */
 async function seed(shortcuts) {
   await sw.evaluate(async (value) => {
     await chrome.storage.local.set({
       'meridiem-shortcuts': value,
-      // 布尔值走 vueuse 的 boolean 序列化器：它只认字符串 'true'/'false'
-      // （写原生 true 进去会被读成 false，预置站点又会并进来一次）
-      'meridiem-preset-sites-merged': 'true',
       'meridiem-theme': 'light',
     })
   }, JSON.stringify(shortcuts))

@@ -2,7 +2,6 @@
 import { onBeforeUnmount, ref } from 'vue'
 import { useShortcuts } from '~/composables/useShortcuts'
 import { useTheme } from '~/composables/useTheme'
-import { PRESET_SITES } from '~/logic/presetSites'
 import { engineColor, searchEngines } from '~/logic/searchEngines'
 import { parseSitesJson } from '~/logic/siteImport'
 import type { ImportedSite } from '~/logic/siteImport'
@@ -25,9 +24,12 @@ const { importSites } = useShortcuts()
 /* ---------------------------------------------------------------
    批量导入站点
    ---------------------------------------------------------------
-   两条路径，共用 `importSites()`（按网址去重合并，不动已有磁贴）：
-   - 一键导入：`presetSites.ts` 里从 iTab 备份提取好的清单；
-   - 粘贴导入：用户自己把 iTab 备份 JSON 贴进来，跑 `parseSitesJson()`。
+   个人站点是**本机数据**，不进源码：仓库里的清单会被打包进扩展产物、
+   推上远端，而书签（尤其是自家后台、内网地址、带账号参数的链接）属于隐私。
+
+   所以这里只保留一条路径 ——「粘贴配置导入」：
+   解析出的站点写进 `browser.storage.local` 的 `meridiem-shortcuts` 键，
+   只留在当前这台机器上，不经过构建、不写入任何文件。
    --------------------------------------------------------------- */
 const importOpen = ref(false)
 const importText = ref('')
@@ -45,10 +47,6 @@ function reportImportResult(result: { added: number, skipped: number }) {
   statusTimer = window.setTimeout(() => {
     importStatus.value = ''
   }, 6000)
-}
-
-function importPreset() {
-  reportImportResult(importSites(PRESET_SITES))
 }
 
 function openImport() {
@@ -202,16 +200,6 @@ onBeforeUnmount(() => {
           <button
             type="button"
             class="ghost-control focus-ring"
-            data-test="import-preset"
-            @click="importPreset"
-          >
-            <span class="i-carbon-download" aria-hidden="true" />
-            导入 iTab 站点（{{ PRESET_SITES.length }}）
-          </button>
-
-          <button
-            type="button"
-            class="ghost-control focus-ring"
             data-test="open-import"
             @click="openImport"
           >
@@ -219,6 +207,10 @@ onBeforeUnmount(() => {
             粘贴配置导入
           </button>
         </div>
+
+        <p class="settings-card__desc">
+          导入的站点只保存在本机浏览器 storage 里，不会写进源码或构建产物。
+        </p>
 
         <p
           v-if="importStatus"

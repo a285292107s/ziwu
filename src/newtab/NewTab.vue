@@ -1,15 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onUnmounted, ref } from 'vue'
 import SkyBackdrop from '~/components/SkyBackdrop.vue'
 import { paletteFor, phaseForHour } from '~/logic/ambience'
 import { parseSkyOverride } from '~/logic/sky'
-import { useShortcuts } from '~/composables/useShortcuts'
 import { useTheme } from '~/composables/useTheme'
-import { PRESET_SITES } from '~/logic/presetSites'
-import { greeting, presetSitesMerged, presetSitesMergedReady, shortcutsReady } from '~/logic/storage'
+import { greeting } from '~/logic/storage'
 
 const { isDark, setTheme } = useTheme()
-const { importSites } = useShortcuts()
 
 /* ---------------- 评审用的时间覆盖 ----------------
    `?sky=6.5` 把整页钉在今天 06:30。连时钟一起钉住是故意的：
@@ -62,22 +59,14 @@ function openOptionsPage() {
   browser.runtime.openOptionsPage()
 }
 
-/* ---------------- 一次性并入 iTab 预置站点 ----------------
-   `defaultShortcuts()` 只在 storage 里没有 `meridiem-shortcuts` 时生效，
-   已经在用的实例读不到新预置站点。这里做一次合并：用户原有的磁贴留在原位，
-   只把网址还没出现过的补到末尾。
+/* ---------------- 预置站点 ----------------
+   首次安装的种子站点由 `defaultShortcuts()` 提供，且**只在 storage 里没有
+   `meridiem-shortcuts` 键时写入一次**（`storage.ts` 里 `mergeDefaults: false`）。
 
-   两个 ready 都必须等。`importSites` 是拿「当前列表」去重的，
-   在 `shortcutsReady` 落地前列表还是空的，已有站点会被当成新站点再插一遍。
-   `presetSitesMerged` 保证只跑一次，之后用户删掉的不会被复活。 */
-onMounted(async () => {
-  await Promise.all([shortcutsReady, presetSitesMergedReady])
-  if (presetSitesMerged.value)
-    return
-
-  importSites(PRESET_SITES)
-  presetSitesMerged.value = true
-})
+   这里刻意不做任何「补进预置站点」的合并动作：
+   个人站点属于用户本机数据，只通过设置页的「粘贴配置导入」写入 storage。
+   页面若在挂载时往回补种子站点，用户删掉的磁贴会被复活，
+   而预置清单本身也不该被扩展到个人站点上。 */
 </script>
 
 <template>

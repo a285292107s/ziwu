@@ -4,7 +4,7 @@
  * 与 `searchEngines.ts` 一样，这里不依赖 Vue / storage / `browser`，
  * 只做数据变换，方便单元测试直接引入。
  */
-import { PRESET_SITES } from './presetSites'
+import { DEFAULT_SITES } from './defaultSites'
 
 export interface Shortcut {
   /** 稳定唯一标识 */
@@ -320,12 +320,15 @@ export function moveItem<T>(list: readonly T[], from: number, to: number): T[] {
 /**
  * 首次使用时预置的站点。
  *
- * 清单来自 `presetSites.ts`（iTab 备份里提取的站点），站点顺序就是磁贴顺序。
- * 已经装过子午 Meridiem、storage 里有 `meridiem-shortcuts` 的实例不受这里影响 ——
- * 那种情况走设置页的「导入 iTab 站点」，按网址去重后补进去。
+ * 清单来自 `defaultSites.ts`，只有与个人无关的公共站点，顺序就是磁贴顺序。
+ *
+ * 注意这个函数**只在 storage 里没有 `meridiem-shortcuts` 键时生效一次**
+ * （见 `storage.ts` 里的 `mergeDefaults: false`）：
+ * 已经装过、storage 里有值的实例永远读不到这里，也不会被它覆盖。
+ * 个人站点通过设置页的「粘贴配置导入」写进 storage，不经过这个函数。
  */
 export function defaultShortcuts(): Shortcut[] {
-  return PRESET_SITES
+  return DEFAULT_SITES
     .map(site => createShortcut(site.name, site.url))
     .filter((item): item is Shortcut => item !== null)
 }
