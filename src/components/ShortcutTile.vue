@@ -2,7 +2,6 @@
 import { computed, watch } from 'vue'
 import { useRealFavicon } from '~/composables/useFavicon'
 import {
-  faviconUrl,
   shortcutDomain,
   shortcutInitial,
 } from '~/logic/shortcuts'
@@ -41,15 +40,18 @@ const emit = defineEmits<{
 }>()
 
 const domain = computed(() => shortcutDomain(props.shortcut.url))
-const icon = computed(() => faviconUrl(props.shortcut.url, 64))
 const initial = computed(() => shortcutInitial(props.shortcut.name, props.shortcut.url))
 
 /**
  * `/_favicon/` 对没缓存过图标的站点会返回通用灰色地球（不是 404），
  * 所以这里要主动判定，判定为占位图就回退到首字母。
+ * 判定结果与图标字节会被持久缓存，所以第二次开新标签页不再重新拉取。
  * 见 composables/useFavicon.ts。
+ *
+ * 图标的 src 也由它给（可能是 `data:`，也可能是没缓存住时的 `/_favicon/` 地址），
+ * 组件不再自己去拼地址 —— 两处各拼一次就会出现「判定用 A、显示用 B」的错配。
  */
-const { showIcon, resolve } = useRealFavicon(() => props.shortcut.url)
+const { showIcon, iconSrc, resolve, onIconError } = useRealFavicon(() => props.shortcut.url)
 
 // 地址变了要重新判定
 watch(() => props.shortcut.url, () => resolve())
@@ -92,14 +94,17 @@ function moveBy(step: -1 | 1) {
            是「识别线索」而不是页面装饰，所以不参与全站单强调色约束。 -->
       <span class="tile-aurora" aria-hidden="true" />
 
+      <!-- 图标解不开时退回首字母：缓存里的坏数据会让浏览器只画一个空白方框，
+           比首字母难看得多。见 useFavicon.ts 的 onIconError。 -->
       <img
-        v-if="showIcon && icon"
-        :src="icon"
+        v-if="showIcon && iconSrc"
+        :src="iconSrc"
         alt=""
         aria-hidden="true"
         class="tile-icon"
         loading="lazy"
         decoding="async"
+        @error="onIconError"
       >
       <span
         v-else
