@@ -19,8 +19,20 @@ const props = withDefaults(defineProps<{
    * 和 `ShortcutGrid` 的 `openInNewTab` 是同一个道理。
    */
   openInNewTab?: boolean
+  /**
+   * 挂载后是否把光标直接放进搜索框。
+   *
+   * 新标签页传 true：这一页的主要动作就是「敲一次关键字」，让用户先点一下
+   * 输入框再打字是白付一次点击。顺带解决另一个坑 —— 焦点不在输入框时，
+   * 未聚焦状态下敲 `N` 会被 ShortcutGrid 的全局快捷键接成「新增磁贴」，
+   * 想搜 `node` 的人会先撞出一个对话框。
+   *
+   * 默认 false：设置页 / 侧边栏里这个框只是预览，抢焦点会打断用户手里的事。
+   */
+  autofocus?: boolean
 }>(), {
   openInNewTab: false,
+  autofocus: false,
 })
 
 const { isDark } = useTheme()
@@ -189,6 +201,21 @@ function onDocumentClick(event: MouseEvent) {
 
 onMounted(() => document.addEventListener('click', onDocumentClick))
 onUnmounted(() => document.removeEventListener('click', onDocumentClick))
+
+/**
+ * 初始焦点。
+ *
+ * `preventScroll` 是必须的：Chrome 聚焦元素时默认会把它滚进视口，
+ * 而入场动画此刻正让搜索框带着 12px 的位移，不拦一下会在矮视口上
+ * 触发一次多余的滚动。
+ *
+ * 焦点环会跟着入场一起淡进来（`:focus-visible` 对文本框恒真），
+ * 所以「打开就在搜索框」这件事用户看得见，不是靠猜。
+ */
+onMounted(() => {
+  if (props.autofocus)
+    inputRef.value?.focus({ preventScroll: true })
+})
 
 // 引擎被其他页面改掉时，同步下拉高亮
 watch(searchEngineKey, () => {

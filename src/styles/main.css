@@ -94,7 +94,11 @@
   --dur-fast: 140ms;
   --dur-base: 240ms;
   --dur-slow: 460ms;
-  --dur-enter: 760ms;
+  /* 入场时长。原来是 760ms：内容进 DOM 只要 60ms、字体 210ms 就绪，
+     却要等 760ms 才落定 —— 对一个每天开几十次的新标签页，那是纯等待。
+     收到 420ms 之后整页在 ~700ms 内收完，而缓动曲线前半段走得快，
+     「浮起」的观感没有被削掉。 */
+  --dur-enter: 420ms;
 
   /* 版心与节奏 */
   --shell-max: 70rem;
@@ -526,6 +530,9 @@ body {
   *::after {
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
+    /* 延迟也要清掉：只压时长的话，入场编排里 60/120/180ms 的延迟还在，
+       内容会「啪、啪、啪」分几次瞬现。这类用户要的是「一次性到位、不要动」。 */
+    animation-delay: 0ms !important;
     animation-iteration-count: 1 !important;
     scroll-behavior: auto !important;
   }

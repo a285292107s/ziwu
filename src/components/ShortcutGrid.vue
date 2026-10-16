@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useTheme } from '~/composables/useTheme'
 import { useShortcuts } from '~/composables/useShortcuts'
+import { shortcutsReady } from '~/logic/storage'
 import {
   assignShortcutAccents,
   moveItem,
@@ -1041,6 +1042,70 @@ function onGlobalKeydown(event: KeyboardEvent) {
   }
 }
 
+/* ---------------------------------------------------------------
+   磁贴入场的斜向波
+   ---------------------------------------------------------------
+   每个磁贴的入场延迟 = **行号 × ROW + 列号 × COL**，从左上往右下扫过去。
+   行距是列距的两倍（60 : 30），于是同一时刻起跑的格子连起来是一条 2:1 的
+   斜边 —— 看起来是一道斜着推进的波前，而不是「一行一行地闪」。
+
+   这些系数只要保持「行 > 列」这个关系，波就是斜的；具体数值决定尾巴多长：
+   6 列 2 行时最后一格延迟 60 + 5×30 = 210ms，加上 420ms 的时长，
+   整块磁贴带在起波后 ~630ms 内收完。
+
+   ## 为什么要等 `shortcutsReady`
+   storage 是异步的，挂载那一刻渲染的是 `defaultShortcuts()` 的种子站，
+   异步回来后整个列表会被换掉。如果两轮各自按行列出场，用户会看到**两波**
+   磁贴（先 6 个种子站、再是他自己的）。
+   所以波要等真列表就位再起，而 `.grid-root` 的幕布（opacity）一直遮到那一刻。
+   比原来那个「固定 260ms 后才开始」的计时器更稳：storage 慢的时候不会露出
+   种子站，快的时候也不会白等。
+   --------------------------------------------------------------- */
+const TILE_WAVE_ROW = 60
+const TILE_WAVE_COL = 30
+/** 安全阀：磁贴特别多时不让尾巴拖得太长 */
+const TILE_WAVE_MAX = 420
+
+/** 幕布是否已拉开、波是否已起 */
+const waveStarted = ref(false)
+/** 一行放得下几格。由真实布局量出来，不硬编码 CSS 里的列数 */
+const gridCols = ref(1)
+
+/** 第 index 格的入场延迟（毫秒） */
+function tileWaveDelay(index: number): number {
+  const row = Math.floor(index / gridCols.value)
+  const col = index % gridCols.value
+  return Math.min(row * TILE_WAVE_ROW + col * TILE_WAVE_COL, TILE_WAVE_MAX)
+}
+
+function startTileWave() {
+  if (waveStarted.value)
+    return
+
+  const el = gridEl.value
+  if (el) {
+    // 从布局里读列数：窄屏下网格会换成 auto-fill 等分列，写死列数会算错
+    const cols = getComputedStyle(el).gridTemplateColumns.split(' ').filter(Boolean).length
+    gridCols.value = Math.max(1, cols)
+  }
+
+  // 延迟在模板里由 tileWaveDelay() 算好，和挂动画是同一次 patch ——
+  // 动画跑起来之后再改 delay 会把它重新计时，磁贴会当场跳一下
+  waveStarted.value = true
+}
+
+onMounted(() => {
+  // 兜底：storage 读失败也得拉开幕布，否则磁贴永远不可见
+  const fallback = window.setTimeout(startTileWave, 600)
+  shortcutsReady
+    .then(async () => {
+      await nextTick()
+      startTileWave()
+    })
+    .catch(() => startTileWave())
+    .finally(() => window.clearTimeout(fallback))
+})
+
 onMounted(() => window.addEventListener('keydown', onGlobalKeydown))
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onGlobalKeydown)
@@ -1057,8 +1122,8 @@ watch(list, (value) => {
 </script>
 
 <template>
-  <section class="grid-root" aria-labelledby="shortcuts-heading">
-    <div class="grid-head">
+  <section class="grid-root" :class="{ 'is-waved': waveStarted }" aria-labelledby="shortcuts-heading">
+    <div class="grid-head" :class="{ 'is-entering': waveStarted }">
       <h2 id="shortcuts-heading" class="grid-title">
         快捷方式
       </h2>
@@ -1082,6 +1147,7 @@ watch(list, (value) => {
     <div
       v-if="list.length === 0"
       class="empty-state"
+      :class="{ 'is-entering': waveStarted }"
       data-test="shortcuts-empty"
     >
       <span class="empty-mark" aria-hidden="true">
@@ -1108,9 +1174,9 @@ watch(list, (value) => {
       <li
         v-for="(shortcut, index) in displayed"
         :key="shortcut.id"
-        class="tile-cell animate-rise-in"
-        :class="{ 'is-drag-source': dragIndex === index }"
-        :style="{ animationDelay: `${Math.min(index, 8) * 40}ms` }"
+        class="tile-cell"
+        :class="{ 'is-drag-source': dragIndex === index, 'is-entering': waveStarted }"
+        :style="{ '--tile-enter-delay': `${tileWaveDelay(index)}ms` }"
         :data-tile-index="index"
         :data-shortcut-id="shortcut.id"
         @pointerdown="onTilePointerDown(index, $event)"
@@ -1133,8 +1199,9 @@ watch(list, (value) => {
 
       <!-- 新增磁贴：与图标同尺寸，位置固定在末尾 -->
       <li
-        class="tile-cell animate-rise-in"
-        :style="{ animationDelay: `${Math.min(displayed.length, 8) * 40}ms` }"
+        class="tile-cell"
+        :class="{ 'is-entering': waveStarted }"
+        :style="{ '--tile-enter-delay': `${tileWaveDelay(displayed.length)}ms` }"
       >
         <button
           type="button"
@@ -1273,6 +1340,16 @@ watch(list, (value) => {
    --------------------------------------------------------------- */
 .grid-root {
   width: 100%;
+  /* 幕布：真列表还没就位时先不显示。
+     挂载那一刻渲染的是种子站，storage 异步回来后整份会被换成用户的磁贴；
+     不遮住就会看到「先一批别人的站、再闪成自己的」。
+     原来这层幕布是 NewTab.vue 里一个固定 260ms 才开始的动画，现在改成
+     按就位信号（见 startTileWave），storage 慢的时候也不会露馅。 */
+  opacity: 0;
+}
+
+.grid-root.is-waved {
+  opacity: 1;
 }
 
 .grid-head {
@@ -1380,6 +1457,21 @@ watch(list, (value) => {
   -webkit-tap-highlight-color: transparent;
   /* 允许页面滚动和双指缩放，但不要双击缩放（双击第二下会变成拖动） */
   touch-action: manipulation;
+}
+
+/* 逐格入场：延迟 = 行 × 60ms + 列 × 30ms（见 script 里的 tileWaveDelay）。
+   动画只在幕布拉开后才挂 —— 挂早了会在种子站列表上先跑一遍，
+   等真列表换上又跑一遍，看着就是「抖了两下」。 */
+.tile-cell.is-entering {
+  animation: rise-in var(--dur-enter) var(--ease-out) both;
+  animation-delay: var(--tile-enter-delay, 0ms);
+}
+
+/* 标题行跟着波一起出：它是这一块的「扶手」，比磁贴早一点点到位更顺，
+   但没必要单占一段编排。 */
+.grid-head.is-entering,
+.empty-state.is-entering {
+  animation: rise-in var(--dur-enter) var(--ease-out) both;
 }
 
 /* 拖动中的「空位」

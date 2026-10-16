@@ -169,7 +169,7 @@ function openOptionsPage() {
           >
         </div>
 
-        <SearchBox />
+        <SearchBox autofocus />
       </section>
 
       <div class="shortcuts-band">
@@ -375,7 +375,7 @@ function openOptionsPage() {
 /* ---- 问候语 ---- */
 .greeting-block {
   margin-top: 0.7rem;
-  animation: rise-in var(--dur-enter) var(--ease-out) 90ms both;
+  animation: rise-in var(--dur-enter) var(--ease-out) 60ms both;
 }
 
 .greeting {
@@ -422,7 +422,7 @@ function openOptionsPage() {
    它内部 position:absolute 的引擎下拉就会被压在后面的磁贴带下面
    （截图里能看到磁贴从菜单里透出来）。挂在没有子级浮层的 .search-shell 上就没这个问题。 */
 .hero :deep(.search-shell) {
-  animation: rise-in var(--dur-enter) var(--ease-out) 180ms both;
+  animation: rise-in var(--dur-enter) var(--ease-out) 120ms both;
 }
 
 .hero :deep(.search-root) {
@@ -430,10 +430,14 @@ function openOptionsPage() {
 }
 
 /* ---- 磁贴带 ----
-   同上：动画挂在 .grid-root，不挂在作为 flex 子项的 .shortcuts-band 上。 */
-.shortcuts-band :deep(.grid-root) {
-  animation: rise-in var(--dur-enter) var(--ease-out) 260ms both;
-}
+   这里**不再**给整块磁贴带挂入场动画。
+   原来是一层 260ms 后才开始的 rise-in（`both` 填充让整块先隐身后升起），
+   它顺手把磁贴各自的错峰整个盖住了 —— 磁贴的动画在幕布后面就跑完了，
+   用户看到的其实是「整块一起升起」。
+   现在的编排是逐格斜向波（行 × 60ms + 列 × 30ms），并且幕布改成由
+   ShortcutGrid 自己按「真列表是否就位」控制：storage 异步回来后列表会被
+   整份替换，用固定计时器当幕布会在慢机器上露出「种子站 → 用户磁贴」那一下。
+   见 components/ShortcutGrid.vue 的 startTileWave()。 */
 
 /* ---------------------------------------------------------------
    响应式
