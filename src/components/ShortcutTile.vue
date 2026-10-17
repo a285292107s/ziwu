@@ -233,8 +233,29 @@ function moveBy(step: -1 | 1) {
   transition: opacity var(--dur-base) var(--ease-out);
 }
 
+/* 悬停：磁贴抬起来一点，**图标自己再站直一点**。
+   抬升量从 -4px 提到 -5px —— 这不是随手加的：入场那一套动作的位移是
+   20px（玻璃面）+ 10px（图标）+ 15% 的过冲，而交互反馈原来只有 -4px，
+   **手指的力道反而比「页面自己动」还轻**，层级是反的。
+
+   放大只给 5%：两个缩放是**相乘**的 —— 入场动画占
+   `scale` 独立属性、悬停占 `transform`，两者不互相覆盖而是叠加。
+   新标签页刚打开时指针常常正好停在页面中央，那一格如果在波里，
+   顶点处就是 1.15 × 悬停倍数；放大越多，那一格越显眼。
+
+   为什么「放大」写在图标上而不是磁贴面上：`.tile-face` 带 backdrop-filter，
+   缩放它就得让合成器每帧按新尺寸重新采样背后的 WebGL 天空 ——
+   这正是入场那一层把 `scale` 拿掉的原因，没道理在 hover 上再加回来。
+   图标没有 backdrop，放大它是免费的，而且「图标精神了一点」本来
+   就比「整块玻璃变大」更像一次应答。
+
+   图标这条走 `transform` 而不是 `scale`：入场那条动画占着 `scale` 通道，
+   在它跑完之前**动画来源在层叠里压过普通声明** —— 写在 `scale` 上的
+   hover 会在入场那一小段时间里静默失效。`transform` 是空着的，
+   所以悬停应答从入场的第一帧起就成立；代价就是上面那句「相乘」。
+   两者只能选一个，这里选了「应答永远在」。 */
 a.tile-face:hover {
-  transform: translateY(-4px);
+  transform: translateY(-5px);
   border-color: color-mix(in srgb, var(--tile-accent) 42%, var(--line));
   background: var(--surface-hover);
   box-shadow:
@@ -246,9 +267,19 @@ a.tile-face:hover .tile-aurora {
   opacity: 1;
 }
 
+a.tile-face:hover .tile-icon,
+a.tile-face:hover .tile-initial {
+  transform: scale(1.05);
+}
+
 a.tile-face:active {
-  transform: translateY(-1px) scale(0.97);
+  transform: translateY(-1px);
   transition-duration: var(--dur-fast);
+}
+
+a.tile-face:active .tile-icon,
+a.tile-face:active .tile-initial {
+  transform: scale(0.94);
 }
 
 .tile.is-editing .tile-face {
@@ -260,6 +291,9 @@ a.tile-face:active {
   width: 1.75rem;
   height: 1.75rem;
   object-fit: contain;
+  /* 只有 hover / active 的“站直一点”走这条 transition；
+     入场动画占的是 scale/rotate/translate，两者互不干扰。 */
+  transition: transform var(--dur-base) var(--ease-spring);
 }
 
 /* 首字母回退：中性徽标 + 一圈站点色细环。
@@ -286,6 +320,7 @@ a.tile-face:active {
   line-height: 1;
   letter-spacing: 0.01em;
   transition:
+    transform var(--dur-base) var(--ease-spring),
     background var(--dur-base) var(--ease-out),
     border-color var(--dur-base) var(--ease-out),
     color var(--dur-base) var(--ease-out);

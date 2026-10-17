@@ -13,8 +13,9 @@ import type { Storage } from 'webextension-polyfill'
 
 export type WebExtensionStorageOptions<T> = UseStorageAsyncOptions<T>
 
+// 照搬 vueuse 的 guess.ts：序列化器的选择取决于初值的类型。
 // https://github.com/vueuse/vueuse/blob/658444bf9f8b96118dbd06eba411bb6639e24e88/packages/core/useStorage/guess.ts
-export function guessSerializerType(rawInit: unknown) {
+function guessSerializerType(rawInit: unknown) {
   return rawInit == null
     ? 'any'
     : rawInit instanceof Set

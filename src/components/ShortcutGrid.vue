@@ -27,7 +27,6 @@ const { isDark } = useTheme()
 /**
  * 同一屏内不撞色的配色表（与 list 顺序一一对应）。
  * 详见 logic/shortcuts.ts 的 assignShortcutAccents()。
- * 深浅两套调色板下标对齐，切主题时站点留在同一个色系里。
  *
  * 取色按 **站点 id** 而不是下标：拖动排序时磁贴会换位置，
  * 按下标取色会让颜色跟着格子跑（一屏颜色乱跳），按 id 取则
@@ -188,16 +187,15 @@ function undoRemoval() {
 /* ---------------------------------------------------------------
    按住图标拖动排序：鼠标 / 触屏 / 触控笔统一走指针事件
    ---------------------------------------------------------------
-   原来用的是 HTML5 的 dragstart / dragover / drop，它有两个绕不开的限制：
-   触屏浏览器根本不派发这些事件（手机上图标永远排不了序），而且必须先点
-   「整理」进编辑模式才拖得动。现在换成一套指针手势：
+   不用 HTML5 的 dragstart / drop：触屏浏览器根本不派发这些事件
+   （手机上图标永远排不了序），而且必须先点「整理」进编辑模式才拖得动。
 
    输入按「精度」分两类，不按设备分：
-   - **手指**（`pointerType === 'touch'`）：门槛 0.35 秒、**任何模式**都要先按住、
-     卡片抬到指尖上方。手指点不准、容易慢点击、还挡视线，这三件事都得让着它；
+   - **手指**（`pointerType === 'touch'`）：门槛更久、**任何模式**都要先按住、
+     卡片抬到指尖上方。手指点不准、容易慢点击、还挡视线；
      顺带也保证了「想滚页面」不会变成「拖图标」（设置页 / 侧边栏那种长列表里
      尤其明显，iOS 整理主屏也是这个规矩）。
-   - **精度输入**（鼠标 / 触控笔）：门槛 0.22 秒、卡片不抬（笔尖要对得准）；
+   - **精度输入**（鼠标 / 触控笔）：门槛短、卡片不抬（笔尖要对得准）；
      「整理」模式里磁贴不是链接、没有误打开站点的风险，位移几像素就开拖。
      长按成立之前**移动不取消手势** —— 桌面上「按下顺手就拖」最自然，
      而取消的后果是「拖动没发生、松手还变成一次点击」。
@@ -215,7 +213,7 @@ const HOLD_MOUSE_MS = 220
  * 手指要更久一点。
  * 手指的「慢点击」很常见（按住两百多毫秒再抬手），门槛按鼠标那套定的话，
  * 这些点击会先被判成拖动、然后被 click 守卫吃掉 —— 打开站点是这个组件的
- * 主操作，宁可让拖动多等一百毫秒。
+ * 主操作，宁可让拖动多等一会儿。
  */
 const HOLD_TOUCH_MS = 350
 /** 长按生效前允许的抖动（手指按在屏幕上几乎一定会位移几个像素） */
@@ -1046,37 +1044,112 @@ function onGlobalKeydown(event: KeyboardEvent) {
    磁贴入场的斜向波
    ---------------------------------------------------------------
    每个磁贴的入场延迟 = **行号 × ROW + 列号 × COL**，从左上往右下扫过去。
-   行距是列距的两倍（60 : 30），于是同一时刻起跑的格子连起来是一条 2:1 的
-   斜边 —— 看起来是一道斜着推进的波前，而不是「一行一行地闪」。
+   同一时刻起跑的格子连起来就是波前那条斜线。
 
-   这些系数只要保持「行 > 列」这个关系，波就是斜的；具体数值决定尾巴多长：
-   6 列 2 行时最后一格延迟 60 + 5×30 = 210ms，加上 420ms 的时长，
-   整块磁贴带在起波后 ~630ms 内收完。
+   ## 错峰要够大，可见行程要跨得过几个步进
+   错峰只有单格动作时长的十分之一时，十来个格子等于同时在半空中，
+   波前糊成一片均匀的「整排一起冒出来」。
+   另一头的失败是**起手段太陡**：位移在设计上存在、在观看里不存在，人眼读成跳变；
+   用弹簧同样不行 —— 它的可见行程只占时长的一小截，在固定步进下填不满一格波前。
+   结论是三条一起才成立：错峰要够大、单格的**起手段要够长**、**收尾段要够短**，
+   而且**可见行程要跨得过几个步进**，否则波前退化成逐格闪烁。
+   详见下面图标那段的「可见行程」一节。
+
+   ## 行列等步进 = 真 45°
+   格子在画面上是**正方**的（列距与行距几乎相等）。两轴每格推进量相等，
+   波前才是一条货真价实的 45° 斜线；两轴不等时给出来的是浅斜线，斜得不够「斜」。
+   代价是同一个延迟值会同时出现在两行里，这没关系 —— 等值线本来就是一条斜线。
+
+   `TILE_WAVE_LEAD` 是给标题行的：它是这一块的扶手，先落位、
+   磁贴再跟着起波，节奏才有「起—承」而不是齐刷刷地一起出现。
+
+   ## 尾巴必须短，而且尾巴的所有权必须是「内容」
+   新标签页是每天要开几十次的东西，入场是**等待**不是表演。
+   无论磁贴怎么排，**全场最后结束的必须是内容**（图标 / 站名），
+   不能有装饰层把尾巴拖长。这也是高光与波纹那两层被整层删掉的理由之一。
+
+   ## 一个诚实的边界：单行时波峰是「快速擦除」，不是「锐利的波」
+   波峰宽度 = 单格可见行程 ÷ 步进，按当前这两个量算出来只有两三格宽 ——
+   在 2 行以上的排布里正好是一道追得住的斜向波。但宽屏下十来个磁贴
+   会排成**一行**，那时行号恒为 0，「斜向」无从谈起，波前退化成
+   一次从左到右的擦除。这是排布决定的事实，不是调参能解决的：
+   要做出极窄的锐波峰，单格冲量得压到几十毫秒，而那装不下「升起 + 显影」。
 
    ## 为什么要等 `shortcutsReady`
    storage 是异步的，挂载那一刻渲染的是 `defaultShortcuts()` 的种子站，
    异步回来后整个列表会被换掉。如果两轮各自按行列出场，用户会看到**两波**
-   磁贴（先 6 个种子站、再是他自己的）。
+   磁贴（先种子站、再是他自己的）。
    所以波要等真列表就位再起，而 `.grid-root` 的幕布（opacity）一直遮到那一刻。
-   比原来那个「固定 260ms 后才开始」的计时器更稳：storage 慢的时候不会露出
-   种子站，快的时候也不会白等。
+   比「固定延时后才开始」的计时器更稳：storage 慢的时候不会露出种子站，
+   快的时候也不会白等。
    --------------------------------------------------------------- */
-const TILE_WAVE_ROW = 60
-const TILE_WAVE_COL = 30
-/** 安全阀：磁贴特别多时不让尾巴拖得太长 */
-const TILE_WAVE_MAX = 420
+const TILE_WAVE_ROW = 40
+const TILE_WAVE_COL = 40
+/** 标题行先落位，波再起 */
+const TILE_WAVE_LEAD = 40
+/**
+ * 折点：延迟涨到这里之后改走缓坡。
+ *
+ * 硬夹断（`Math.min`）的毛病在磁贴多的时候特别明显：所有越过的格子拿到**同一个延迟**，
+ * 于是「波」在尾巴上变成「啪」地一起出现的一坨。两段折线让延迟永远单调递增，
+ * 只是过了折点走得慢一点，尾巴再长也不会并轨。
+ */
+const TILE_WAVE_KNEE = 400
+/** 折点之后的坡度：每格仍按比例往后错，只是走得更慢 */
+const TILE_WAVE_TAIL = 0.45
 
 /** 幕布是否已拉开、波是否已起 */
 const waveStarted = ref(false)
 /** 一行放得下几格。由真实布局量出来，不硬编码 CSS 里的列数 */
 const gridCols = ref(1)
 
-/** 第 index 格的入场延迟（毫秒） */
+/**
+ * 起波那一刻**定格**的入场延迟：磁贴 id → 毫秒。
+ *
+ * 为什么要定格，而不是每次渲染拿当前下标现算：`animation-delay` 一变，动画就会被
+ * 重新计时 —— 哪怕它早就跑完了，也会从头再放一遍。延迟若跟着 `displayed` 的下标走，
+ * 用户删掉一个磁贴、或者新增一个，后面每一格的延迟都会跟着变，于是半屏磁贴
+ * 无缘无故又入场一次。
+ *
+ * 定格之后，「入场编排」只属于**这个页面被打开的那一次**：
+ * 之后无论怎么增删、排序，它都不再插手。
+ */
+const waveDelays = ref(new Map<string, number>())
+/** 「+」那一格（没有 id）的延迟，同样在起波时定格 */
+const addTileDelay = ref(0)
+
+/** 第 index 格的入场延迟（毫秒）。只在起波那一刻用得上，见 waveDelays */
 function tileWaveDelay(index: number): number {
   const row = Math.floor(index / gridCols.value)
   const col = index % gridCols.value
-  return Math.min(row * TILE_WAVE_ROW + col * TILE_WAVE_COL, TILE_WAVE_MAX)
+  const raw = row * TILE_WAVE_ROW + col * TILE_WAVE_COL
+  // 折点之后不收口、只放缓（见 TILE_WAVE_KNEE）：延迟必须严格单调，
+  // 否则尾巴上的格子会并轨成同一次出现，波就断了
+  const ramp = raw <= TILE_WAVE_KNEE
+    ? raw
+    : TILE_WAVE_KNEE + (raw - TILE_WAVE_KNEE) * TILE_WAVE_TAIL
+  return TILE_WAVE_LEAD + ramp
 }
+
+/** 这一格参不参与入场编排（起波之后才出现的磁贴不参与） */
+function isEntering(id: string): boolean {
+  return waveDelays.value.has(id)
+}
+
+/** 这一格的入场延迟；不在编排里的返回 0 */
+function enterDelay(id: string): number {
+  return waveDelays.value.get(id) ?? 0
+}
+
+/**
+ * 起波之后才加入列表的磁贴 id（新增、撤销删除）。
+ * 它们不排队、不等延迟，立刻做一次短促的落位 ——
+ * 那是对「用户刚刚做了一件事」的应答，和页面打开那一次的斜向波
+ * 是两回事，混在一起会让撤销删除看起来像卡了一拍。
+ */
+const freshIds = ref(new Set<string>())
+/** 上一次渲染的 id 清单，用来认出「新来的那一格」 */
+let prevIds = new Set<string>()
 
 function startTileWave() {
   if (waveStarted.value)
@@ -1089,8 +1162,12 @@ function startTileWave() {
     gridCols.value = Math.max(1, cols)
   }
 
-  // 延迟在模板里由 tileWaveDelay() 算好，和挂动画是同一次 patch ——
+  // 延迟和「挂动画」必须是同一次 patch ——
   // 动画跑起来之后再改 delay 会把它重新计时，磁贴会当场跳一下
+  const frozen = new Map<string, number>()
+  list.value.forEach((shortcut, index) => frozen.set(shortcut.id, tileWaveDelay(index)))
+  waveDelays.value = frozen
+  addTileDelay.value = tileWaveDelay(list.value.length)
   waveStarted.value = true
 }
 
@@ -1114,11 +1191,26 @@ onBeforeUnmount(() => {
   endDrag()
 })
 
-/** 列表空了就自动退出编辑模式，避免停在没有内容的编辑态 */
+/**
+ * 列表空了就自动退出编辑模式，避免停在没有内容的编辑态。
+ * 顺便认出「起波之后新来的磁贴」：入场编排只属于页面打开那一次，
+ * 之后新增 / 撤销回来的磁贴各自做一次短促落位（见 is-fresh）。
+ */
 watch(list, (value) => {
+  if (waveStarted.value) {
+    const fresh = new Set(freshIds.value)
+    value.forEach((item) => {
+      if (!prevIds.has(item.id))
+        fresh.add(item.id)
+    })
+    freshIds.value = fresh
+  }
+
+  prevIds = new Set(value.map(item => item.id))
+
   if (value.length === 0)
     editing.value = false
-})
+}, { immediate: true })
 </script>
 
 <template>
@@ -1175,8 +1267,12 @@ watch(list, (value) => {
         v-for="(shortcut, index) in displayed"
         :key="shortcut.id"
         class="tile-cell"
-        :class="{ 'is-drag-source': dragIndex === index, 'is-entering': waveStarted }"
-        :style="{ '--tile-enter-delay': `${tileWaveDelay(index)}ms` }"
+        :class="{
+          'is-drag-source': dragIndex === index,
+          'is-entering': isEntering(shortcut.id),
+          'is-fresh': freshIds.has(shortcut.id),
+        }"
+        :style="{ '--tile-enter-delay': `${enterDelay(shortcut.id)}ms` }"
         :data-tile-index="index"
         :data-shortcut-id="shortcut.id"
         @pointerdown="onTilePointerDown(index, $event)"
@@ -1201,7 +1297,7 @@ watch(list, (value) => {
       <li
         class="tile-cell"
         :class="{ 'is-entering': waveStarted }"
-        :style="{ '--tile-enter-delay': `${tileWaveDelay(displayed.length)}ms` }"
+        :style="{ '--tile-enter-delay': `${addTileDelay}ms` }"
       >
         <button
           type="button"
@@ -1459,21 +1555,274 @@ watch(list, (value) => {
   touch-action: manipulation;
 }
 
-/* 逐格入场：延迟 = 行 × 60ms + 列 × 30ms（见 script 里的 tileWaveDelay）。
+/* ---------------------------------------------------------------
+   逐格入场：三层编排
+   ---------------------------------------------------------------
+   延迟全部由 `--tile-enter-delay`（见 script 里的 tileWaveDelay）给，
+   波前是一条斜线；三层各自再往后错一点，同一格里的东西就分三次落位。
+   顺序是：玻璃面先落位 → 图标在自己的磁贴里弹出来 → 站名补上收尾。
+   **每层的时长与相对延迟只看下面各自的 animation 声明，这里不复述** ——
+   复述过的数字必然在下一次调参时变成假的。
+
    动画只在幕布拉开后才挂 —— 挂早了会在种子站列表上先跑一遍，
-   等真列表换上又跑一遍，看着就是「抖了两下」。 */
+   等真列表换上又跑一遍，看着就是「抖了两下」。
+
+   ## 为什么填充模式是 `backwards` 而不是 `both`
+   入场需要**延迟期间**就把格子藏起来，所以必须有 backwards 填充。
+   但**不需要** forwards：三层编排的结束值都正好等于元素的静止值。
+   用 `both` 的代价是实打实的 —— 动画结束后那些值会**一直压着**普通声明，
+   而任何非 `none` 的变换属性都会让元素常驻一个层叠上下文和合成层：
+   落定态不是 `none`，而是 `translate: 0px` / `scale: 1` 这类「中性值」，
+   视觉等价，但层叠上下文照建，hover / active 也会被一条跑完的动画压住。
+
+   这条规则对以后加图层的人是硬的：只有某个关键帧的结束值既不等于静止值、
+   又必须在结束后继续生效时，才该改用 `both`。
+
+   同理，下面所有内层动作（图标 / 站名）**只写独立的
+   `translate` / `scale` / `rotate` 属性，一律不碰 `transform`** ——
+   `transform` 是留给 hover / active 的（`.add-tile` 的悬停位移、
+   磁贴图标的悬停放大都在那条通道上）。
+   --------------------------------------------------------------- */
 .tile-cell.is-entering {
-  animation: rise-in var(--dur-enter) var(--ease-out) both;
+  animation: tile-arrive 240ms var(--ease-out) backwards;
   animation-delay: var(--tile-enter-delay, 0ms);
 }
 
-/* 标题行跟着波一起出：它是这一块的「扶手」，比磁贴早一点点到位更顺，
-   但没必要单占一段编排。 */
-.grid-head.is-entering,
-.empty-state.is-entering {
-  animation: rise-in var(--dur-enter) var(--ease-out) both;
+/* 玻璃面：从下往上落位。
+   这一层**刻意不做缩放**：`.tile-face` 带 backdrop-filter，缩放会逼合成器每帧按
+   新尺寸重新采样它背后的 WebGL 天空（天空本身还每帧在变），而图标那层已经有更值钱的
+   缩放了，两层都缩只会让代价翻倍而观感不变。这一层的职责收窄成「上浮 + 显影」。
+
+   opacity 在动作的前段就走完：后面的行程是「位移还在收、已经实了」，
+   比「一边淡入一边移动」更像一件实体落下来。 */
+@keyframes tile-arrive {
+  0% {
+    opacity: 0;
+    translate: 0 20px;
+  }
+
+  30% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 1;
+    translate: none;
+  }
 }
 
+/* ---------------------------------------------------------------
+   图标：整段入场里**唯一一处真正的「动作」**
+   ---------------------------------------------------------------
+   ## 判据是「可见行程」，不是「时长」—— 所以这条动画不能用弹簧
+   波前的可读宽度 = **单格可见行程 ÷ 步进**。可见行程指的是动作里真正在
+   改变画面的那一段，它由曲线的**形状**决定，和 animation 上写的时长不是一回事。
+   弹簧的可见行程只占它自己时长的一小截（剩下的大半截幅度已经在半个像素以内），
+   要让波前涨到和玻璃面同一个宽度，弹簧的时长就得开到接近整页的时间预算 ——
+   **所以这里换掉的是曲线的形状，不是它的参数**。
+
+   于是图标改用和玻璃面、站名同一个 `--ease-out`：**入场里三层共用一套缓动语汇**，
+   可见行程落在同一量级，同一格里三样东西才像在一个节拍里落位。
+
+   ## 为什么用独立的 translate/scale/rotate
+   `transform` 那条通道要留给 hover / active（磁贴图标的悬停放大就在那儿），
+   而这套编排自己只动独立的三个属性，两边互不干涉。
+   收尾能干净地落回 `none` 是 `backwards` 填充带来的，不是独立属性本身带来的 ——
+   两者要一起用（见上面 fill-mode 那段）。
+   `.add-tile`（「+」那一格）直接复用同一条关键帧：它不碰 `transform`，
+   而那个按钮的 hover / active 姿态恰好就是 transform 位移，两者叠加而不是互相覆盖。
+   --------------------------------------------------------------- */
+.tile-cell.is-entering :deep(.tile-icon),
+.tile-cell.is-entering :deep(.tile-initial) {
+  /* 只有一条动画。
+     图标自己的显影**不需要**：`.tile-cell` 的 `tile-arrive` 本来就在做 opacity 0→1，
+     而父层的 opacity 是组不透明度，会乘到整棵子树上。上一版给图标单挂一条 fade，
+     结果是「两层淡入叠在一起」。现在图标的「出现」由格子负责，
+     图标只负责「长大和站直」—— 不透明度与尺寸也就自然走成了两条通道。 */
+  animation: tile-icon-arrive 320ms var(--ease-out) backwards;
+  animation-delay: calc(var(--tile-enter-delay, 0ms) + 50ms);
+}
+
+/* 「+」那一格走**另一条不带旋转**的关键帧。
+   空槽位不是图标，是一个虚线框：它一转就读作「这个框歪了」，
+   而不是「有个东西落进来了」。缩放照旧，倾斜去掉。 */
+.tile-cell.is-entering .add-tile {
+  animation: tile-slot-arrive 320ms var(--ease-out) backwards;
+  animation-delay: calc(var(--tile-enter-delay, 0ms) + 50ms);
+}
+
+/* ---------------------------------------------------------------
+   图标关键帧：**一条曲线，两个关键帧**
+   ---------------------------------------------------------------
+   ## `from` 必须是**看不见**的状态
+   这条最容易被忽略：`animation-fill-mode: backwards` 会把 `from` 关键帧
+   在**整个 delay 期间**渲染出来，而图标这一层的延迟不为零。
+   起点若是一个小而非零的 scale，那段延迟里观众看到的是**一块已经完全
+   不透明的玻璃面正中间钉着一个针尖**。起点写 `scale: 0` 就没有这个问题：
+   元素被压成零尺寸、根本不绘制，delay 期间自然是空的，曲线从 0 长出来。
+
+   ## 为什么没有 translate
+   **translate 是和玻璃面重复的**：`.tile-cell` 自己已经从下方升上来，
+   图标再在磁贴里向上走一段，是**同一个手势说两遍**。
+   删掉之后，图标的位移完全由它所在的那个格子给 —— 图标只负责「出现」。
+
+   rotate 之所以留着，是因为它承担的是**姿态**而不是第二段位移，
+   而且它的可读性随图标的**渲染尺寸**缩放，不是随名义尺寸：
+   起点 scale 0 时它根本不可见，可见的只有接近落定那一小段。
+   --------------------------------------------------------------- */
+@keyframes tile-icon-arrive {
+  from {
+    scale: 0;
+    rotate: -5deg;
+  }
+
+  to {
+    scale: 1;
+    rotate: 0deg;
+  }
+}
+
+/* 「+」那一格：只有缩放，没有旋转，也没有上浮 —— 槽位是长在地面上的。
+   共用同一条曲线，所以它的节奏和图标完全同拍，只是少两个通道。
+   起点同样是 0（不可见），理由见上面 `from` 那段。 */
+@keyframes tile-slot-arrive {
+  from { scale: 0; }
+  to { scale: 1; }
+}
+
+/* 站名：最后一位。图标落定之后文字才跟上，
+   所以它只做「很短的位移 + 淡入」，不再重复一次弹跳 ——
+   同一格里两次过冲会让人分不清哪一下才是「到位」。
+
+   位移走独立的 `translate` 属性而不是 `transform`：这条编排也用在
+   空状态的 `.primary-control` 上，而那个按钮的按下姿态是
+   `transform: scale(0.97)`。写进 transform 会被动画的 both 填充永久压住，
+   按钮按下去就再也没有反馈了；`translate` 与 `transform` 是叠加关系。 */
+.tile-cell.is-entering :deep(.tile-name) {
+  animation: tile-label-arrive 240ms var(--ease-out) backwards;
+  animation-delay: calc(var(--tile-enter-delay, 0ms) + 130ms);
+}
+
+@keyframes tile-label-arrive {
+  0% {
+    opacity: 0;
+    translate: 0 7px;
+  }
+
+  100% {
+    opacity: 1;
+    translate: 0 0;
+  }
+}
+
+/* ---------------------------------------------------------------
+   入场只有三层：玻璃面 / 图标 / 站名
+   ---------------------------------------------------------------
+   曾经这里还挂着「站点色高光扫过磁贴面」和「图标落定时荡开的一圈波纹」。
+   两层都不携带任何信息：不表示状态、不暗示可点击、不帮助认出站点，
+   纯粹是「让画面热闹一点」。代价是实打实的：
+
+   1. **同一个瞬间挤了三件事。** 一格磁贴里同时有：玻璃在升、图标在弹、
+      一道光在扫、一圈环在胀 —— 观众在那 100ms 里收到的是一团运动，
+      不是一个动作。减掉之后，图标冲顶那一刻磁贴上只剩**两件**在动。
+   2. **尾巴被装饰层拖长。** 波纹和站名并列成为最后一层，
+      而「最后结束的必须是内容」是入场的硬要求。
+   3. **动画条数。** 每格只剩三条，每条都对应一件真事。
+
+   注：磁贴自己的站点色存在感仍然由 `--tile-aurora` 负责（常亮的底缘光/晕），
+   那是静态的材质，不属于入场编排。
+   --------------------------------------------------------------- */
+
+/* 起波之后才出现的磁贴（新增、撤销删除）：不排队，立刻落位。
+   延迟为 0 是刻意的：这是对一次用户操作的应答，
+   晚一拍出现会被读成「卡了一下」，而不是「编排」。
+
+   它跟入场那套一样只写独立的 `translate` / `scale`，不碰 `transform`：
+   一来收尾能干净地落回 `none`（这一格会一直带着 `is-fresh`），
+   二来跟入场的写法统一，改一处不用记两套规矩。 */
+.tile-cell.is-fresh {
+  animation: tile-fresh 340ms var(--ease-spring) backwards;
+}
+
+/* 新来的这一格的图标跟入场用**同一套**（同一条曲线），只是不排队：
+   给一个很小的固定延迟，而不是等波前。共用同一条曲线，是为了让
+   「刚加进来的磁贴」和「页面打开时进来的磁贴」看起来是同一个东西。 */
+.tile-cell.is-fresh :deep(.tile-icon),
+.tile-cell.is-fresh :deep(.tile-initial) {
+  animation: tile-icon-arrive 320ms var(--ease-out) 40ms backwards;
+}
+
+@keyframes tile-fresh {
+  0% {
+    opacity: 0;
+    translate: 0 10px;
+    scale: 0.9;
+  }
+
+  100% {
+    opacity: 1;
+    translate: none;
+    scale: none;
+  }
+}
+
+/* 标题行跟着波一起出：它是这一块的「扶手」，比磁贴早一点点到位更顺，
+   但没必要单占一段编排。时长比磁贴短一档 —— 扶手先稳住，波再过去。 */
+.grid-head.is-entering {
+  animation: rise-in 360ms var(--ease-out) backwards;
+}
+
+/* 空状态：没有磁贴可编排时，卡片里的四件东西自己走一遍同样的层次
+   （标记 → 标题 → 说明 → 按钮），不然这一屏就只剩「啪」地一下。 */
+.empty-state.is-entering {
+  animation: rise-in var(--dur-enter) var(--ease-out) backwards;
+}
+
+.empty-state.is-entering .empty-mark {
+  animation: tile-slot-arrive 320ms var(--ease-out) 60ms backwards;
+}
+
+.empty-state.is-entering .empty-title {
+  animation: tile-label-arrive 400ms var(--ease-out) 150ms backwards;
+}
+
+.empty-state.is-entering .empty-hint {
+  animation: tile-label-arrive 400ms var(--ease-out) 210ms backwards;
+}
+
+.empty-state.is-entering .primary-control {
+  animation: tile-label-arrive 400ms var(--ease-out) 270ms backwards;
+}
+
+/* ---------------------------------------------------------------
+   减少动效：入场不是「压缩到 0.01ms」，而是**整条编排不参与**
+   ---------------------------------------------------------------
+   main.css 里那条全局规则只是把时长压到近乎为零，它并不等于「没有动画」：
+   动画仍然存在，0% 关键帧仍然会被绘制一帧。
+   对「减少动效」的用户来说，正确的结果是**从第一帧起就是静止态**，
+   所以这里直接把这几条入场动画摘掉 —— 元素的基样式本来就等于落定态
+   （格子不透明、图标恒等、站名恒等）。
+
+   摘掉之后连 `animation-delay` 都不用管：没有动画，就没有延迟期，
+   也就不存在「内容分几次啪、啪、啪地瞬现」。 */
+@media (prefers-reduced-motion: reduce) {
+  .tile-cell.is-entering,
+  .tile-cell.is-fresh,
+  .grid-head.is-entering,
+  .empty-state.is-entering,
+  .tile-cell.is-entering .add-tile,
+  .tile-cell.is-entering :deep(.tile-icon),
+  .tile-cell.is-entering :deep(.tile-initial),
+  .tile-cell.is-entering :deep(.tile-name),
+  .tile-cell.is-fresh :deep(.tile-icon),
+  .tile-cell.is-fresh :deep(.tile-initial),
+  .empty-state.is-entering .empty-mark,
+  .empty-state.is-entering .empty-title,
+  .empty-state.is-entering .empty-hint,
+  .empty-state.is-entering .primary-control {
+    animation: none;
+  }
+}
 /* 拖动中的「空位」
    ---------------------------------------------------------------
    被拿起来的那一格只留一个「落点」：虚线框画在图标自身上（3.75rem 那个方块），

@@ -40,7 +40,7 @@
 export const FAVICON_CACHE_KEY = 'meridiem-favicon-cache-v1'
 
 /** 真图标的保鲜期：过期后先照显旧图，再在后台重新验证一次 */
-export const FAVICON_CACHE_TTL = 7 * 24 * 60 * 60 * 1000
+const FAVICON_CACHE_TTL = 7 * 24 * 60 * 60 * 1000
 
 /**
  * 「这个站点没有图标」这个**否定结论**的保鲜期，比真图标短得多。
@@ -51,21 +51,20 @@ export const FAVICON_CACHE_TTL = 7 * 24 * 60 * 60 * 1000
  * 6 小时足够覆盖「连着开一堆新标签页」的真实场景（这段时间零请求），
  * 又不会把一个过期的否定压太久。
  */
-export const FAVICON_MISS_TTL = 6 * 60 * 60 * 1000
-
+const FAVICON_MISS_TTL = 6 * 60 * 60 * 1000
 /** 条目数上限，超出按时间淘汰最旧的 */
 const MAX_ENTRIES = 200
 
 /**
  * 单张图标的 data: URL 长度上限。
- * 正常 64px 图标是 1.6–2.5KB；异常大的直接不缓存，避免一条把整个缓存撑爆。
+ * 正常图标只有几 KB；异常大的直接不缓存，避免一条把整个缓存撑爆。
  */
 const MAX_DATA_LENGTH = 64 * 1024
 
 /**
  * 整份缓存的总字节预算。
  *
- * 只有条目数上限是不够的：200 × 64KB = 12.8MB，远超 localStorage 的 ~5MB 配额，
+ * 只有条目数上限是不够的：条目上限乘上单条上限，远超 localStorage 的配额，
  * 真撞上去每次写入都会失败、再触发「砍一半重试」的同步序列化，磁贴会卡。
  * 这里按总字节数兜住，超了就从最旧的开始丢。
  * 真实占用是「十几个磁贴 × 2KB ≈ 几十 KB」，256KB 有足够余量。

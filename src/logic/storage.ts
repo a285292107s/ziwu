@@ -1,6 +1,7 @@
 import { DEFAULT_SEARCH_ENGINE_KEY } from './searchEngines'
 import { defaultShortcuts } from './shortcuts'
 import type { Shortcut } from './shortcuts'
+import { THEME_MIRROR_KEY } from './themeBoot'
 import { useWebExtensionStorage } from '~/composables/useWebExtensionStorage'
 
 /**
@@ -42,14 +43,32 @@ export const { data: shortcuts, dataReady: shortcutsReady } = useWebExtensionSto
 /**
  * 主题：只有 'light' / 'dark' 两态（右上角按钮直接切换）。
  *
- * 初始值取系统偏好，这样首次打开时观感是对的；
- * 一旦用户手动切过，就完全按用户的选择走，不再跟随系统。
+ * 初始值先取 `localStorage` 里的**同步镜像**（`useTheme()` 每次主题变化都会写它，
+ * 见 composables/useTheme.ts），没有再退回系统偏好。
+ *
+ * 为什么不能直接用系统偏好：`chrome.storage.local` 是异步的，而 `useTheme()` 的
+ * watch 是 `immediate` 的 —— 挂载那一刻它就会按**初始值**去设置 `<html>` 上的类。
+ * 如果初始值取系统偏好，那么「用户存了深色、系统是浅色」的场景会在挂载瞬间
+ * 把首帧脚本（src/newtab/theme-boot.js）刚放好的 dark 改成 light，
+ * 几十毫秒后再被 storage 的返回值改回来 —— 白屏闪一下又回来了。
+ * 镜像和首帧脚本读的是同一个键，两边对得上，这一段抖动就消失了。
  */
 export type ThemeMode = 'light' | 'dark'
 
 function initialThemeMode(): ThemeMode {
-  if (typeof window !== 'undefined' && typeof window.matchMedia === 'function')
-    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+  if (typeof window !== 'undefined') {
+    try {
+      const mirrored = window.localStorage.getItem(THEME_MIRROR_KEY)
+      if (mirrored === 'dark' || mirrored === 'light')
+        return mirrored
+    }
+    catch {
+      // localStorage 不可用（隐私设置/企业策略）时静默退回系统偏好
+    }
+
+    if (typeof window.matchMedia === 'function')
+      return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+  }
 
   return 'light'
 }

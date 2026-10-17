@@ -1,5 +1,6 @@
 import { computed, watch } from 'vue'
 import { themeMode } from '~/logic/storage'
+import { THEME_MIRROR_KEY } from '~/logic/themeBoot'
 
 /**
  * 主题：只有 light / dark 两态，右上角按钮一键互换。
@@ -9,6 +10,10 @@ import { themeMode } from '~/logic/storage'
  *
  * UnoCSS 配的是 `dark: 'class'`，所以这里往 <html> 上挂/摘 `dark` 类。
  * 同时挂 `color-scheme`，让滚动条和原生表单控件一起变色。
+ *
+ * 另外把结果**镜像**进 localStorage：`chrome.storage.local` 是异步的，
+ * 新标签页的第一帧等不到它，只能靠这个同步副本在首帧之前预置主题
+ * （写入方在这里，读取方是 src/newtab/theme-boot.js）。
  */
 export function useTheme() {
   const isDark = computed(() => themeMode.value === 'dark')
@@ -16,7 +21,19 @@ export function useTheme() {
   watch(isDark, (dark) => {
     const root = document.documentElement
     root.classList.toggle('dark', dark)
+    // `.light` 给 index.html 里那条 `@media (prefers-color-scheme: dark) html:not(.light)`
+    // 兜底规则用：显式选过浅色之后，系统偏好不能再把首帧翻成深色。
+    root.classList.toggle('light', !dark)
     root.style.colorScheme = dark ? 'dark' : 'light'
+
+    try {
+      window.localStorage.setItem(THEME_MIRROR_KEY, dark ? 'dark' : 'light')
+    }
+    catch (error) {
+      /* 隐私设置 / 企业策略下 localStorage 可能不可写。
+         它只是首帧的兜底副本，写不进去不影响主题本身，所以吞掉。 */
+      void error
+    }
   }, { immediate: true })
 
   /** 浅色 ⇄ 深色 */

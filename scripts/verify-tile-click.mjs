@@ -127,7 +127,7 @@ async function waitForTab(needle, timeout = 3000) {
 
 await seed(ALL)
 
-/* 1. 普通点击 */
+/* 普通点击 */
 const tiles = await reset()
 logs.length = 0
 let at = await point('[data-test="shortcut-tile-a"] .tile-face')
@@ -135,7 +135,7 @@ await page.mouse.click(at.x, at.y)
 await page.waitForTimeout(1200)
 results.push({ case: '普通点击', tiles, url: page.url(), ok: tiles === 3 && page.url().includes('/a'), logs: [...logs] })
 
-/* 2. 按住 320ms 再松手（不挪窝） */
+/* 按住 320ms 再松手（不挪窝）：慢点击仍要打开站点 */
 await reset()
 logs.length = 0
 at = await point('[data-test="shortcut-tile-a"] .tile-face')
@@ -146,7 +146,7 @@ await page.mouse.up()
 await page.waitForTimeout(1200)
 results.push({ case: '按住 320ms 松手', url: page.url(), ok: page.url().includes('/a'), logs: [...logs] })
 
-/* 3. 按住 900ms 再松手：不算点击 */
+/* 按住 900ms 再松手：按得够久又没挪窝，不算点击 */
 await reset()
 logs.length = 0
 at = await point('[data-test="shortcut-tile-a"] .tile-face')
@@ -157,7 +157,7 @@ await page.mouse.up()
 await page.waitForTimeout(1200)
 results.push({ case: '按住 900ms 松手', url: page.url(), ok: !page.url().includes('127.0.0.1'), logs: [...logs] })
 
-/* 4. 拖动排序：按住 300ms 后拖到第 2 格 */
+/* 拖动排序：按住 300ms 后拖到第 2 格 */
 const tiles4 = await reset()
 logs.length = 0
 at = await point('[data-test="shortcut-tile-a"] .tile-face')
@@ -178,7 +178,7 @@ results.push({
   logs: [...logs],
 })
 
-/* 5. Ctrl+点击（不按住）：原生新标签页 */
+/* Ctrl+点击（不按住）：原生新标签页 */
 await seed(ALL)
 await reset()
 logs.length = 0
@@ -190,7 +190,7 @@ await page.keyboard.up('Control')
 const ctrlOpened = await waitForTab('/a')
 results.push({ case: 'Ctrl+点击', tabs: openTabs().filter(u => u.includes('127.0.0.1')), ok: ctrlOpened, logs: [...logs] })
 
-/* 6. 中键点击（不按住）：原生新标签页 */
+/* 中键点击（不按住）：原生新标签页 */
 await seed(ALL)
 await reset()
 logs.length = 0
@@ -199,7 +199,7 @@ await page.mouse.click(at.x, at.y, { button: 'middle' })
 const middleOpened = await waitForTab('/a', 2000)
 results.push({ case: '中键点击', tabs: openTabs().filter(u => u.includes('127.0.0.1')), ok: middleOpened, logs: [...logs] })
 
-/* 7. 键盘 Enter */
+/* 键盘 Enter */
 for (const p of browser.pages()) {
   if (p !== page)
     await p.close()
@@ -211,7 +211,7 @@ await page.keyboard.press('Enter')
 await page.waitForTimeout(1000)
 results.push({ case: '键盘 Enter', url: page.url(), ok: page.url().includes('/a'), logs: [...logs] })
 
-/* 7. 触屏轻点（手指路径） */
+/* 触屏轻点（手指路径） */
 await reset()
 logs.length = 0
 at = await point('[data-test="shortcut-tile-a"] .tile-face')
@@ -219,7 +219,7 @@ await page.touchscreen.tap(at.x, at.y)
 await page.waitForTimeout(1200)
 results.push({ case: '触屏轻点', url: page.url(), ok: page.url().includes('/a'), logs: [...logs] })
 
-/* 8. 触屏按住拖拽：手指路径也要能排序，且不跳转 */
+/* 触屏按住拖拽：手指路径也要能排序，且不跳转 */
 await seed(ALL)
 const tiles8 = await reset()
 logs.length = 0
@@ -241,7 +241,7 @@ results.push({
   logs: [...logs],
 })
 
-/* 9. 设置页里的磁贴（ShortcutGrid 传了 openInNewTab，应当开新标签页） */
+/* 设置页里的磁贴（ShortcutGrid 传了 openInNewTab，应当开新标签页） */
 for (const p of browser.pages()) {
   if (p !== page)
     await p.close()

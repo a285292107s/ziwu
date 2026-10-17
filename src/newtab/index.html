@@ -11,6 +11,48 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>子午 Meridiem</title>
   <!--
+    ---------------------------------------------------------------
+    首帧底色 + 主题预置 —— 「打开新标签页白屏闪一下」就是在这里修的
+    ---------------------------------------------------------------
+    原来的顺序是：浏览器先画它自己的白底 → 外部 CSS 到达后画一帧**浅色** token
+    → module 脚本执行 → chrome.storage 异步返回主题 → 才翻成深色。
+    存了深色主题的用户于是要连吃两下闪：白一下，再亮一下。
+
+    这一段内联 <style> 必须留在 <head> 里、且排在 Vite 注入的样式表**之前**：
+    它要和 HTML 同一趟到达，不能等第二次往返。底色必须等于 main.css 里的
+    `--bg-deep`（浅色 / 深色两处）—— 构建期的 theme-boot-guard 会校验，
+    改了一处忘了另一处会直接构建失败，不会变成一次「看不出来哪里错了」的闪。
+
+    紧跟其后的 <script src="./theme-boot.js"> 是**经典脚本**（不是 module）：
+    它在解析期间同步执行，赶在第一帧之前把 html 上的 dark/light 类放对。
+    为什么不能内联：MV3 生产 CSP 是 script-src 'self'，而 Chromium 把 hash 源
+    当成不安全的 CSP 值，加了 sha256 会让整个扩展加载失败（实测见 theme-boot.js）。
+  -->
+  <style>
+    /* 下面两个 background-color 必须等于 main.css 里 --bg-deep 的两个值：
+       light → :root、dark → :root.dark。改一处忘了另一处，theme-boot-guard 会直接构建失败。 */
+    html {
+      background-color: #e8edf2; /* theme-boot-guard:light */
+      color-scheme: light;
+    }
+
+    html.dark {
+      background-color: #04060a; /* theme-boot-guard:dark */
+      color-scheme: dark;
+    }
+
+    /* 脚本没跑起来时（被拦、被禁、或用户在极慢的机器上看到的第一帧）跟随系统偏好。
+       `:not(.light)` 是为了不覆盖「存了浅色主题、系统是深色」这种明确选择：
+       只有没被显式声明过浅色时，系统偏好才有发言权。 */
+    @media (prefers-color-scheme: dark) {
+      html:not(.light) {
+        background-color: #04060a;
+        color-scheme: dark;
+      }
+    }
+  </style>
+  <script src="./theme-boot.js"></script>
+  <!--
     时钟字体的 <link rel="preload"> 由 vite.config.mts 的 clock-font-preload 插件
     在构建时注入：产物文件名带内容哈希，源码里写不出来。
   -->

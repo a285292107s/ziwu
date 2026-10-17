@@ -1,21 +1,27 @@
 /**
  * 快捷方式（图标磁贴）的纯逻辑。
  *
- * 与 `searchEngines.ts` 一样，这里不依赖 Vue / storage / `browser`，
- * 只做数据变换，方便单元测试直接引入。
+ * 不依赖 Vue / storage / `browser`，只做数据变换。
  */
 import { DEFAULT_SITES } from './defaultSites'
 
 export interface Shortcut {
-  /** 稳定唯一标识 */
   id: string
-  /** 磁贴上显示的名称 */
   name: string
   /** 目标地址，始终为绝对 URL */
   url: string
 }
 
-/** 生成 id：优先用 crypto.randomUUID，缺失时降级（非安全上下文/测试环境） */
+/**
+ * 一条「还没有 id」的站点。备份文件存的就是这个形状：id 属于导出它的那台机器，
+ * 跨机器搬运时由接收方重新生成。
+ */
+export interface ShortcutSeed {
+  name: string
+  url: string
+}
+
+/** 生成 id：优先用 crypto.randomUUID，缺失时降级（非安全上下文） */
 export function createId(): string {
   const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto
   if (c && typeof c.randomUUID === 'function')
@@ -123,19 +129,14 @@ export function faviconUrl(pageUrl: string, size = 64): string | null {
 export const FAVICON_PROBE_URL = 'https://meridiem-favicon-probe.invalid/'
 
 /**
- * 首字母回退用的配色（浅色主题）。
+ * 首字母回退配色（浅色主题）。
  *
  * 选用原则：
- * 1. **明度锁在同一个窄区间**，全部配白字可达 WCAG AA，最低实测 4.53:1，
- *    高于正文门槛 4.5:1。单个色值逐个算过，不靠感觉。
- * 2. **饱和度比 Tailwind 默认色阶低一档**。这套色是站点识别线索，
- *    不是页面装饰：页面本身只有一个强调色（青），磁贴如果一排水彩，
- *    整页的调性会被这排小方块拖走。
- * 3. 数量要够多。只有 8 色时「知乎」和「哔哩哔哩」会撞成同一个粉色，
- *    一排磁贴里出现两个同色，看起来像重复项。16 色后撞色概率明显下降。
- *
- * 注意：颜色由域名哈希决定，所以同一个站点永远是同一个颜色
- * （排序、增删都不会变色）。这是刻意的：颜色是识别线索，不该随机跳。
+ * 1. **明度锁在同一个窄区间**，全部配白字可达 WCAG AA（单个色值逐个算过）。
+ * 2. **饱和度比 Tailwind 默认色阶低一档**。这套色是站点识别线索，不是页面装饰：
+ *    页面本身只有一个强调色（青），磁贴如果一排水彩，整页调性会被拖走。
+ * 3. 数量要够多 —— 只有 8 色时「知乎」和「哔哩哔哩」会撞成同一个粉色，
+ *    一排磁贴里出现两个同色，看起来像重复项。
  */
 export const SHORTCUT_ACCENTS = [
   '#0f766e', // teal
@@ -159,10 +160,8 @@ export const SHORTCUT_ACCENTS = [
 /**
  * 首字母回退配色（深色主题）。
  *
- * 深色下不能直接用上面那套：颜色压在深背景上会糊成一团，
- * 而且白字压在深色底上会让整块磁贴「陷进去」。
- * 这里换成同色系的高明度版本，配深色文字（--text-on-accent），
- * 每一色对磁贴底色的对比度都 ≥ 6.0:1。
+ * 深色下不能直接用上面那套：颜色压在深背景上会糊成一团。
+ * 这里换成同色系的高明度版本，配深色文字（`--text-on-accent`）。
  *
  * **下标必须与 SHORTCUT_ACCENTS 一一对应**：同一个站点在切换主题时
  * 要留在同一个色系里，只是明暗翻转，而不是换一个颜色。
@@ -186,18 +185,13 @@ export const SHORTCUT_ACCENTS_DARK = [
   '#94a3b8', // slate
 ] as const
 
-/** 由字符串稳定地派生一个下标（同一个域名永远同一个颜色） */
+/** 由字符串稳定地派生一个哈希（同一个域名永远同一个颜色） */
 function hashSeed(seed: string): number {
   let hash = 0
   for (let i = 0; i < seed.length; i++)
     hash = (hash * 31 + seed.charCodeAt(i)) >>> 0
 
   return hash
-}
-
-/** 取磁贴回退配色：优先按域名，域名缺失时按名称 */
-export function shortcutAccent(seed: string): string {
-  return SHORTCUT_ACCENTS[hashSeed(seed) % SHORTCUT_ACCENTS.length]
 }
 
 /**
@@ -207,10 +201,9 @@ export function shortcutAccent(seed: string): string {
  * 4 个磁贴里有 2 个同色，看起来像重复项）。这里按列表顺序做线性探测：
  * 从哈希位置开始往后找第一个没用过的颜色。
  *
- * 代价要说清楚：**没有撞色的磁贴颜色永远稳定**（比如 GitHub 一直是同一个色），
- * 只有发生撞色的那个才会被顺延到下一个颜色。所以增删/排序可能让
- * 「撞色过的那一个」变色。这个取舍是有意的：一屏内出现两个同色磁贴，
- * 比偶尔换一次颜色更像 bug。
+ * 代价要说清楚：**没有撞色的磁贴颜色永远稳定**，只有发生撞色的那个才会被
+ * 顺延到下一个颜色。所以增删/排序可能让「撞色过的那一个」变色。这个取舍是
+ * 有意的：一屏内出现两个同色磁贴，比偶尔换一次颜色更像 bug。
  *
  * 颜色数不够时（磁贴数 > 调色板）允许绕回重复。
  */
@@ -322,10 +315,9 @@ export function moveItem<T>(list: readonly T[], from: number, to: number): T[] {
  *
  * 清单来自 `defaultSites.ts`，只有与个人无关的公共站点，顺序就是磁贴顺序。
  *
- * 注意这个函数**只在 storage 里没有 `meridiem-shortcuts` 键时生效一次**
- * （见 `storage.ts` 里的 `mergeDefaults: false`）：
- * 已经装过、storage 里有值的实例永远读不到这里，也不会被它覆盖。
- * 个人站点通过设置页的「粘贴配置导入」写进 storage，不经过这个函数。
+ * 这个函数**只在 storage 里没有 `meridiem-shortcuts` 键时生效一次**
+ * （见 `storage.ts` 里的 `mergeDefaults: false`）：已经装过、storage 里有值的
+ * 实例永远读不到这里。个人站点通过设置页的「导入备份」写进 storage。
  */
 export function defaultShortcuts(): Shortcut[] {
   return DEFAULT_SITES

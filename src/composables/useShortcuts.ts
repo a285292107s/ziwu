@@ -8,8 +8,7 @@ import {
   sanitizeShortcuts,
   shortcutDomain,
 } from '~/logic/shortcuts'
-import type { ImportedSite } from '~/logic/siteImport'
-import type { Shortcut } from '~/logic/shortcuts'
+import type { Shortcut, ShortcutSeed } from '~/logic/shortcuts'
 
 /**
  * 磁贴的读写入口。
@@ -22,7 +21,15 @@ export function useShortcuts() {
   /** 过滤 + 去重后的安全列表 */
   const list = computed<Shortcut[]>(() => sanitizeShortcuts(shortcuts.value))
 
-  /** 过滤后的数据与原数据不一致 → 说明 storage 里有脏数据，需要落盘清理 */
+  /**
+   * 批量写入的两种语义。
+   *
+   * `merge` 用于「把另一台机器的备份并进来」：保留本机已有的磁贴与原顺序，
+   * 只把网址还没出现过的补到末尾。
+   * `replace` 用于「用备份完整还原」：本机磁贴整份换成备份里的，顺序也照备份来。
+   */
+  type WriteMode = 'merge' | 'replace'
+
   function persist(next: Shortcut[]) {
     shortcuts.value = next
   }
@@ -71,16 +78,24 @@ export function useShortcuts() {
   }
 
   /**
-   * 批量导入站点（设置页的「粘贴配置导入」走这里）。
+   * 批量写入站点（设置页的「导入备份」走这里）。
    *
-   * 语义是**合并**而不是覆盖：保留用户已有的磁贴与它们的顺序，
-   * 只把「网址还没出现过」的补到末尾。
+   * 入参是**不带 id** 的裸站点（见 `ShortcutSeed`），id 在这里现造：
+   * 备份里的 id 属于导出它的那台机器，照抄会让「合并」出现两条同 id 的磁贴，
+   * 之后删一个会连带动到另一个。
+   *
+   * 两种语义见 `WriteMode`。无论哪种，都先过 `normalizeUrl`，
    * 已存在的按规范化网址（去掉结尾斜杠）比对，所以
    * `https://taobao.com` 与 `https://taobao.com/` 不会被当成两个站点。
    */
-  function importSites(sites: readonly ImportedSite[]): { added: number, skipped: number } {
-    const existing = new Set(list.value.map(item => item.url.replace(/\/$/, '')))
-    const next = [...list.value]
+  function writeSites(
+    sites: readonly ShortcutSeed[],
+    mode: WriteMode,
+  ): { added: number, skipped: number } {
+    const current = list.value
+    const base = mode === 'replace' ? [] : current
+    const existing = new Set(base.map(item => item.url.replace(/\/$/, '')))
+    const next = [...base]
 
     let added = 0
     let skipped = 0
@@ -107,17 +122,19 @@ export function useShortcuts() {
       added++
     }
 
-    if (added > 0)
+    if (mode === 'replace') {
+      // 覆盖模式即便「新的和旧的完全一样」也要落盘：目标是「和备份一致」，
+      // 顺序也得对齐，否则用户看不出还原起了作用。
       persist(next)
+    }
+    else if (added > 0) {
+      // 合并模式没有新站点时**不写**：白写一次会让其它标签页收到一轮
+      // 无意义的 storage.onChanged，磁贴白白重渲染一次。
+      persist(next)
+    }
 
     return { added, skipped }
   }
 
-  /** 清掉 storage 里的脏数据（重复项、非法 URL 等） */
-  function cleanup() {
-    if (list.value.length !== (shortcuts.value?.length ?? 0))
-      persist(list.value)
-  }
-
-  return { list, add, update, remove, insertAt, move, importSites, cleanup }
+  return { list, add, update, remove, insertAt, move, writeSites }
 }

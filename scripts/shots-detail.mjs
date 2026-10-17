@@ -56,8 +56,10 @@ await page.screenshot({
 })
 console.log(`  saved shortcuts-region.png (section width ${Math.round(sbox.width)} css px)`)
 
-// 单个磁贴特写
-await clipShot('[data-test^="tile-"]', 'tile-closeup')
+// 单个磁贴特写。注意磁贴的 data-test 是 `shortcut-tile-<id>`，
+// 而整理模式的四个小按钮是 `tile-edit-` / `tile-delete-` / `tile-left-` / `tile-right-`，
+// 所以这里必须写全 `shortcut-tile-`，不能用 `tile-` 前缀（那会先匹配到按钮上）。
+await clipShot('[data-test^="shortcut-tile-"]', 'tile-closeup')
 
 // 搜索框特写
 await clipShot('.search-shell', 'search-closeup')
@@ -70,7 +72,7 @@ const metrics = await page.evaluate(() => {
   const heading = q('#shortcuts-heading')
   const editBtn = q('[data-test="toggle-edit"]')
   const addTile = q('[data-test="add-shortcut"]')
-  const tiles = [...document.querySelectorAll('[data-test^="tile-"]')].map(el => el.getBoundingClientRect())
+  const tiles = [...document.querySelectorAll('[data-test^="shortcut-tile-"]')].map(el => el.getBoundingClientRect())
   return {
     searchShell: { left: Math.round(shell.left), right: Math.round(shell.right), width: Math.round(shell.width) },
     grid: { left: Math.round(grid.left), right: Math.round(grid.right), width: Math.round(grid.width) },

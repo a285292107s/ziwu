@@ -1,5 +1,6 @@
 import { dirname, relative } from 'node:path'
-import type { UserConfig } from 'vite'
+import fs from 'node:fs'
+import type { Plugin, UserConfig } from 'vite'
 import { defineConfig } from 'vite'
 import Vue from '@vitejs/plugin-vue'
 import Icons from 'unplugin-icons/vite'
@@ -8,8 +9,129 @@ import Components from 'unplugin-vue-components/vite'
 import AutoImport from 'unplugin-auto-import/vite'
 import UnoCSS from 'unocss/vite'
 import { isDev, port, r } from './scripts/utils'
-import packageJson from './package.json'
 import unoConfig from './unocss.config'
+import { THEME_MIRROR_KEY } from './src/logic/themeBoot'
+
+/**
+ * theme-boot：首帧主题预置的「打包 + 同步校验」。
+ *
+ * 背景：新标签页「白屏闪一下」的修法，是把底色和主题判断放到首帧之前（见
+ * src/newtab/index.html 与 src/newtab/theme-boot.js）。这个插件负责把它正确地
+ * 送进产物，并把几个**分散在两个文件里的值**变成构建期硬错误 —— 它们一旦漂移，
+ * 症状是一次很难归因的闪动，而不是报错：
+ *   - index.html 里内联的底色 ≠ main.css 的 --bg-deep → 开页时颜色跳一下；
+ *   - theme-boot.js 里的镜像键 ≠ useTheme() 写入的键 → 预置静默失效，闪回原样。
+ *
+ * 还有一条只有 Vite 能兜住的坑：`<script src="./theme-boot.js">` 是**经典脚本**，
+ * Vite 不会把它当入口（只有 module 脚本才会），html 里那个相对路径会**原样留在产物里**
+ * —— 而 `dist/newtab/` 下并没有这个文件，于是脚本 404、预置静默失效。
+ * 实测过：构建成功、产物里写着 `./theme-boot.js`、控制台一片安静，只有帧里那一下闪
+ * 还在。所以这里在构建时把它 emit 成 `assets/theme-boot.js` 并改写标签，
+ * 改不动就直接抛错（见下面 transformIndexHtml 的兜底断言）。
+ */
+function themeBoot(): Plugin {
+  let command: 'build' | 'serve' = 'serve'
+  let base = '/'
+  let enabled = true
+  let bootScript = ''
+
+  return {
+    name: 'theme-boot',
+    enforce: 'pre',
+
+    configResolved(config) {
+      command = config.command
+      base = config.base.endsWith('/') ? config.base : `${config.base}/`
+      /* 后台脚本复用了 sharedConfig（vite.config.background.mts 里 `...sharedConfig`），
+         但它是 lib 构建、没有 HTML 入口：这里既不该校验也不该落资源，
+         否则会在 extension/dist/background/ 下多出一份没人引用的 theme-boot.js。 */
+      enabled = !config.build.lib
+    },
+
+    buildStart() {
+      if (!enabled)
+        return
+
+      // 1. main.css 是底色的真源：浅色、深色各一处 --bg-deep，顺序即主题顺序
+      const mainCss = fs.readFileSync(r('src/styles/main.css'), 'utf-8')
+      const bgDeep = [...mainCss.matchAll(/--bg-deep:\s*(#[0-9a-f]{6})/gi)].map(m => m[1].toLowerCase())
+      if (bgDeep.length !== 2) {
+        throw new Error(
+          `[theme-boot] src/styles/main.css 里期望恰好 2 个 --bg-deep（浅色在前、深色在后），实际 ${bgDeep.length} 个。`
+          + `首帧底色依赖这两个值。`,
+        )
+      }
+
+      // 2. index.html 的内联首帧底色必须与之一致（标记 theme-boot-guard:light / :dark）
+      const html = fs.readFileSync(r('src/newtab/index.html'), 'utf-8')
+      const marked = new Map(
+        [...html.matchAll(/background-color:\s*(#[0-9a-f]{6});[^\n]*theme-boot-guard:(\w+)/gi)]
+          .map(m => [m[2].toLowerCase(), m[1].toLowerCase()]),
+      )
+      const expect: Record<string, string> = { light: bgDeep[0], dark: bgDeep[1] }
+      for (const [name, hex] of Object.entries(expect)) {
+        if (marked.get(name) !== hex) {
+          throw new Error(
+            `[theme-boot] 首帧底色与 main.css 的 --bg-deep 不一致（${name}）：`
+            + `src/newtab/index.html 里是 ${marked.get(name) ?? '缺失'}，main.css 里是 ${hex}。`
+            + `两处必须一致，否则开页会闪一下颜色。`,
+          )
+        }
+      }
+
+      // 3. 首帧脚本必须是经典脚本，且读的镜像键与 useTheme() 写入的一致
+      bootScript = fs.readFileSync(r('src/newtab/theme-boot.js'), 'utf-8')
+      if (/^\s*(?:import|export)\s/m.test(bootScript)) {
+        throw new Error(
+          '[theme-boot] src/newtab/theme-boot.js 里出现了 import / export。'
+          + '它必须保持经典脚本（同步执行），变成 module 会被推迟到首帧之后，预置就失效了。',
+        )
+      }
+      if (!bootScript.includes(`'${THEME_MIRROR_KEY}'`)) {
+        throw new Error(
+          `[theme-boot] src/newtab/theme-boot.js 里没有读到镜像键 '${THEME_MIRROR_KEY}'`
+          + `（真源在 src/logic/themeBoot.ts）。键名对不上时首帧预置会静默失效。`,
+        )
+      }
+
+      // 4. 构建时把它作为静态资源落到 assets/ 下，URL 固定，便于产物里核对。
+      //    dev 不 emit（Vite 的 dev server 不写盘），桩页面由 scripts/prepare.ts 指向 dev server。
+      if (command === 'build') {
+        this.emitFile({
+          type: 'asset',
+          fileName: 'assets/theme-boot.js',
+          source: bootScript,
+        })
+      }
+    },
+
+    transformIndexHtml: {
+      order: 'post',
+      handler(html, ctx) {
+        // 只处理新标签页；其余页面没有这段脚本
+        if (!ctx.filename.replace(/\\/g, '/').endsWith('src/newtab/index.html'))
+          return html
+
+        // 注意必须连 </script> 一起匹配：index.html 的注释里也写了这个标签的样子，
+        // 只匹配 `src="./theme-boot.js"` 会改到注释上、真正的标签原样留在产物里。
+        const tag = '<script src="./theme-boot.js"></script>'
+        const occurrences = html.split(tag).length - 1
+        if (occurrences !== 1) {
+          throw new Error(
+            `[theme-boot] src/newtab/index.html 里期望恰好 1 个 ${tag}，实际 ${occurrences} 个。`
+            + '首帧主题预置依赖它在 <head> 里同步执行；标签改名或搬走时，这个插件要一起改。',
+          )
+        }
+
+        // serve 模式留给 prepare.ts 的桩页面改写，这里不动
+        if (command !== 'build')
+          return html
+
+        return html.replace(tag, `<script src="${base}assets/theme-boot.js"></script>`)
+      },
+    },
+  }
+}
 
 export const sharedConfig: UserConfig = {
   root: r('src'),
@@ -17,10 +139,6 @@ export const sharedConfig: UserConfig = {
     alias: {
       '~/': `${r('src')}/`,
     },
-  },
-  define: {
-    __DEV__: isDev,
-    __NAME__: JSON.stringify(packageJson.name),
   },
   plugins: [
     Vue(),
@@ -77,6 +195,8 @@ export const sharedConfig: UserConfig = {
         return html.replace(/"\/assets\//g, `"${relative(dirname(path), '/assets')}/`)
       },
     },
+
+    themeBoot(),
 
     // 时钟字体的 preload
     //
