@@ -67,6 +67,7 @@ node scripts/rebuild.mjs scripts/contrast-audit.mjs   # 构建完接着跑指定
 
 # 交互行为验证（会真的点、真的拖，断言跳转与落盘结果）
 node --no-experimental-require-module scripts/verify-tile-click.mjs
+node --no-experimental-require-module scripts/verify-first-tab.mjs   # 进入页面的第一站是搜索框
 
 # 视觉评审截图 → docs/review/<轮次>/
 node --no-experimental-require-module scripts/preview.mjs <轮次>   # 新标签页整屏截图

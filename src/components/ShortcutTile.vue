@@ -7,7 +7,7 @@ import {
 } from '~/logic/shortcuts'
 import type { Shortcut } from '~/logic/shortcuts'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   shortcut: Shortcut
   /** 由父组件统一分配的回退配色，保证同一屏内不撞色 */
   accent: string
@@ -25,7 +25,18 @@ const props = defineProps<{
    * 这样 Ctrl/⌘+点击、中键点击仍然是浏览器原生的「开新标签页」。
    */
   openInNewTab?: boolean
-}>()
+  /**
+   * 网格方向键导航的 roving tabindex：只有当前格是 Tab 停靠点。
+   * 普通模式下由父组件按 activeCell 计算；编辑模式下磁贴面本身退出 Tab 顺序。
+   */
+  tabIndex?: number
+  /** 是否是当前磁贴：编辑模式下只有它的四个操作按钮进入 Tab 顺序 */
+  active?: boolean
+}>(), {
+  openInNewTab: false,
+  tabIndex: 0,
+  active: false,
+})
 
 const emit = defineEmits<{
   (e: 'move', from: number, to: number): void
@@ -85,7 +96,7 @@ function moveBy(step: -1 | 1) {
       :rel="openInNewTab ? 'noreferrer' : undefined"
       :title="editing ? undefined : `${shortcut.name} · ${domain}`"
       :aria-label="editing ? undefined : `${shortcut.name}（${domain}）`"
-      :tabindex="editing ? -1 : 0"
+      :tabindex="tabIndex"
       class="tile-face focus-ring"
       draggable="false"
       @click="editing ? $event.preventDefault() : undefined"
@@ -137,6 +148,7 @@ function moveBy(step: -1 | 1) {
       <button
         type="button"
         class="tile-action focus-ring"
+        :tabindex="active ? 0 : -1"
         aria-label="编辑这个快捷方式"
         :data-test="`tile-edit-${shortcut.id}`"
         @click="emit('edit', shortcut)"
@@ -147,6 +159,7 @@ function moveBy(step: -1 | 1) {
       <button
         type="button"
         class="tile-action tile-action--danger focus-ring"
+        :tabindex="active ? 0 : -1"
         aria-label="删除这个快捷方式"
         :data-test="`tile-delete-${shortcut.id}`"
         @click="emit('remove', shortcut)"
@@ -157,6 +170,7 @@ function moveBy(step: -1 | 1) {
       <button
         type="button"
         class="tile-action tile-action--reorder focus-ring"
+        :tabindex="active ? 0 : -1"
         :aria-disabled="index === 0"
         :aria-label="`将 ${shortcut.name} 前移`"
         :data-test="`tile-left-${shortcut.id}`"
@@ -170,6 +184,7 @@ function moveBy(step: -1 | 1) {
       <button
         type="button"
         class="tile-action tile-action--reorder focus-ring"
+        :tabindex="active ? 0 : -1"
         :aria-disabled="index === total - 1"
         :aria-label="`将 ${shortcut.name} 后移`"
         :data-test="`tile-right-${shortcut.id}`"

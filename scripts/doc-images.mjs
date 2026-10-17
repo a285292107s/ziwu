@@ -93,18 +93,32 @@ async function shot(file, options = {}) {
 }
 
 /**
- * 搜索框特写：以 .search-shell 的盒子为基准向外留白，
- * 下拉展开时把菜单的高度也算进去，否则菜单会被裁掉。
+ * 搜索框特写：以胶囊的盒子为基准向外留白，
+ * 把浮在胶囊外的引擎气泡环一起圈进来；下拉展开时再把菜单的高度算进去。
  */
 async function shotSearchBox(file, { withDropdown }) {
   const shell = await page.locator('.search-shell').boundingBox()
   if (!shell)
     throw new Error('找不到 .search-shell，配图裁剪基准失效')
 
+  // 气泡环伸到胶囊左/上/下侧，只按胶囊盒子裁会把环切掉一半。
+  // 只把可见气泡算进裁剪范围；收起态其余气泡仍在 DOM 里、但不可见，不能算进来。
+  const bubbles = await page.locator('.engine-bubble').evaluateAll(els =>
+    els
+      .filter(el => Number(getComputedStyle(el).opacity) > 0.01)
+      .map((el) => {
+        const r = el.getBoundingClientRect()
+        return { left: r.left, top: r.top, right: r.right, bottom: r.bottom }
+      }),
+  )
+  const left = Math.min(shell.x, ...bubbles.map(b => b.left))
+  const top = Math.min(shell.y, ...bubbles.map(b => b.top))
+  const right = Math.max(shell.x + shell.width, ...bubbles.map(b => b.right))
+
   const padX = 34
   const padTop = 30
   // 下留白刻意留小：留 34px 会把下面「整理」按钮的顶边切进画面（实测右下角出现一条杂边）
-  let bottom = shell.y + shell.height + 16
+  let bottom = Math.max(shell.y + shell.height, ...bubbles.map(b => b.bottom)) + 16
   if (withDropdown) {
     const menu = await page.locator('[role="listbox"]').boundingBox()
     if (!menu)
@@ -112,14 +126,14 @@ async function shotSearchBox(file, { withDropdown }) {
     bottom = Math.max(bottom, menu.y + menu.height + 30)
   }
 
-  const x = Math.max(0, shell.x - padX)
-  const y = Math.max(0, shell.y - padTop)
+  const x = Math.max(0, left - padX)
+  const y = Math.max(0, top - padTop)
   await page.screenshot({
     path: path.join(outDir, file),
     clip: {
       x,
       y,
-      width: Math.min(VIEWPORT.width - x, shell.width + padX * 2),
+      width: Math.min(VIEWPORT.width - x, right + padX - x),
       height: Math.min(VIEWPORT.height - y, bottom - y),
     },
   })
@@ -133,11 +147,29 @@ try {
   await openNewTab({ theme: 'light' })
   await shot('newtab-preview.png')
 
-  /* ---- 浅色：搜索框特写 + 引擎下拉 ---- */
+  /* ---- 浅色：按住 Alt 的区块快捷键提示 ---- */
+  await page.keyboard.down('Alt')
+  await page.waitForTimeout(240)
+  await shot('keyboard-hints.png')
+  await page.keyboard.up('Alt')
+  await page.waitForTimeout(240)
+  // Alt 按键会把搜索框标成「在用」；重新载入，让后面的特写保持静默焦点
+  await page.reload()
+  await page.waitForSelector('[data-test="search-input"]')
+  await page.waitForSelector('[data-test="shortcut-grid"]')
+  await page.waitForTimeout(900)
+
+  /* ---- 浅色：搜索框收起态 + 按 Tab 展开后的引擎环 ---- */
   await shotSearchBox('search-box.png', { withDropdown: false })
+  await page.keyboard.press('Tab')
+  await page.waitForTimeout(340)
+  await shotSearchBox('search-ring.png', { withDropdown: false })
+
+  /* ---- 浅色：引擎下拉（打开时会收起环） ---- */
   await page.locator('[data-test="engine-trigger"]').click()
   await page.waitForSelector('[role="listbox"]')
-  await page.waitForTimeout(320)
+  // 打开下拉会触发引擎环的退场；等散开动画彻底结束再裁下拉图，避免把残影圈进裁剪范围
+  await page.waitForTimeout(700)
   await shotSearchBox('search-dropdown.png', { withDropdown: true })
   await page.keyboard.press('Escape')
 

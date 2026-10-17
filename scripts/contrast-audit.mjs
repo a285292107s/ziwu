@@ -108,6 +108,24 @@ const surfaces = [
       ['「取消」按钮', '[data-test="dialog-cancel"]', 'normal'],
     ],
   },
+  /**
+   * Alt 提示也是状态：按住 Alt 才出现，所以单独切到那个状态再量。
+   * 放在最后：页面上 Alt 保持按下，避免残留到后面的表面。
+   */
+  {
+    name: 'newtab-hints',
+    url: 'newtab',
+    ready: '.key-hint',
+    prepare: async (page) => {
+      await page.keyboard.down('Alt')
+      await page.waitForTimeout(300)
+    },
+    targets: [
+      ['提示键帽', '.key-hint .kbd', 'normal'],
+      ['提示文字', '.key-hint__label', 'normal'],
+      ['提示方向键说明', '.key-hint__detail', 'normal'],
+    ],
+  },
 ]
 
 const browser = await chromium.launchPersistentContext('', {

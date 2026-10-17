@@ -248,7 +248,7 @@ onBeforeUnmount(() => {
           默认搜索引擎
         </h2>
         <p class="settings-card__desc">
-          新标签页按 <kbd class="kbd">Tab</kbd> 可以在这些引擎之间快速轮换。
+          新标签页搜索框聚焦时，按 <kbd class="kbd">Tab</kbd> 展开引擎环并在这些引擎之间快速轮换，停手后环会收起；按 <kbd class="kbd">Esc</kbd> 退出搜索框。
         </p>
 
         <div class="engine-picker" role="radiogroup" aria-label="默认搜索引擎">
@@ -271,8 +271,9 @@ onBeforeUnmount(() => {
 
         <div class="preview">
           <span class="preview__label">试一下</span>
-          <!-- 预览里开新标签页：同标签页跳转会把设置页自己顶掉（与磁贴同理） -->
-          <SearchBox open-in-new-tab />
+          <!-- 预览里开新标签页：同标签页跳转会把设置页自己顶掉（与磁贴同理）。
+               不在预览里铺引擎气泡环：这张卡片上方已经有 7 张引擎卡片，环会溢出版心。 -->
+          <SearchBox open-in-new-tab :engine-ring="false" />
         </div>
       </section>
 

@@ -1,7 +1,10 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, onUnmounted, ref } from 'vue'
+import KeyHints from '~/components/KeyHints.vue'
 import SkyBackdrop from '~/components/SkyBackdrop.vue'
 import { paletteFor, phaseForHour } from '~/logic/ambience'
+import { keyHints } from '~/logic/keyHints'
+import type { KeyHintAction } from '~/logic/keyHints'
 import { PAGE_BEAT_MS } from '~/logic/motion'
 import { parseSkyOverride } from '~/logic/sky'
 import { useTheme } from '~/composables/useTheme'
@@ -62,12 +65,203 @@ const backdropStyle = computed(() => ({
  */
 const beatStyle = { '--beat': `${PAGE_BEAT_MS}ms` }
 
+/* ---------------- 从浏览器界面进入页面时，第一站是搜索框 ----------------
+   新标签页打开时 Chromium 把键盘焦点留在地址栏。用户按下 Tab 后，焦点从**文档开头**
+   进入页面 —— 也就是右上角的「设置」按钮。可这一页的主操作是搜索，键盘用户的第一下
+   Tab 应该落在搜索框里，和鼠标用户打开时看到的光标是同一个位置。
+
+   为什么不把搜索框在 DOM 里挪到最前面：那要连带把 masthead、问候语一起挪，
+   视觉顺序与阅读顺序就分家了（CSS `order` 只改布局、不改 Tab 顺序），
+   而且设置按钮在页面结构里确实属于页眉。这里只接管**从页面外进入**的那一下焦点；
+   之后从搜索框离开靠 Esc 或 Alt 区块快捷键，页面其它区域仍保留原生 Tab 顺序。
+
+   ## 怎么认出「从页面外进来」这一步
+   三条一起看（实测过语义，见评审记录）：
+   - `relatedTarget === null`：页面内部 Tab 会带上「上一个焦点元素」，鼠标点击也是；
+     null 只出现在焦点从文档外被送来的时候（地址栏 Tab、初始 autofocus）。
+   - `:focus-visible`：鼠标点设置按钮时它是 false，不会把鼠标用户拽走。
+   - 落点比搜索框更靠前：搜索按钮、磁贴这些在它后面的位置属于正常 Tab 顺序，不接管。
+   初始 autofocus 也满足前两条，但它的落点就是搜索框本身，直接放行。
+
+   **只接管一次。** 如果每次从地址栏进来都重定向，页眉（设置 / 主题）和问候语就再也
+   进不了原生 Tab 顺序了 —— 每次绕回浏览器界面再 Tab 都被送回搜索框。一次性接管之后，
+   往下就是搜索框自己的 Tab 行为（永久切引擎）和 Alt 区块导航。 */
+interface SearchBoxApi { focusInput: () => void, inputEl: () => HTMLInputElement | null }
+interface ShortcutGridApi {
+  focusGrid: () => void
+  toggleEditing: () => void
+  openCreate: () => void
+  isKeyboardLocked: () => boolean
+}
+const search = ref<SearchBoxApi | null>(null)
+const shortcutGrid = ref<ShortcutGridApi | null>(null)
+const settingsButton = ref<HTMLButtonElement | null>(null)
+const greetingInput = ref<HTMLInputElement | null>(null)
+/** 首次「从页面外进入」的接管名额，用掉就不再重定向 */
+let firstEntryPending = true
+/** 手动把焦点送回搜索框时，不消耗上面那个一次性名额（见 `focusSearchFromBlank`） */
+let restoringBlankFocus = false
+
+function onFirstEnterFocus(event: FocusEvent) {
+  if (restoringBlankFocus || !firstEntryPending || event.relatedTarget)
+    return
+
+  const target = event.target
+  if (!(target instanceof HTMLElement) || !target.matches(':focus-visible'))
+    return
+
+  firstEntryPending = false
+
+  const input = search.value?.inputEl()
+  if (!input || target === input || target.contains(input) || input.contains(target))
+    return
+
+  if (!(input.compareDocumentPosition(target) & Node.DOCUMENT_POSITION_PRECEDING))
+    return
+
+  search.value?.focusInput()
+}
+
+onMounted(() => document.addEventListener('focusin', onFirstEnterFocus))
+onBeforeUnmount(() => document.removeEventListener('focusin', onFirstEnterFocus))
+
+/* ---------------- 焦点停在页面空白处时，Tab 回到搜索框 ----------------
+   点搜索框以外的空白，浏览器会把焦点留在 `body` 上；下一次 Tab 从点击位置继续，
+   落到问候语还是设置取决于点在哪 —— 同一个「点空白再 Tab」会给出不同落点。
+   搜索是这一页的主操作：焦点不在任何控件上时，Tab / Shift+Tab 都先回到输入框。
+   焦点已经在设置 / 问候语 / 磁贴等控件上时，仍按原生 Tab 顺序走。
+
+   从浏览器界面（地址栏）进来的那一下 Tab 不经过这里：keydown 发生在页面外，
+   由上面的 focusin 一次性接管负责。对话框和拖动期间也不接管。 */
+function pageHasNoFocusedControl() {
+  const active = document.activeElement
+  return active === document.body || active === document.documentElement
+}
+
+function focusSearchFromBlank() {
+  const input = search.value?.inputEl()
+  if (!input)
+    return false
+
+  restoringBlankFocus = true
+  input.focus()
+  restoringBlankFocus = false
+  return true
+}
+
 /* ---------------- 问候语就地编辑 ---------------- */
 const editingGreeting = ref(false)
 
 function openOptionsPage() {
   browser.runtime.openOptionsPage()
 }
+
+/* ---------------- 区块快捷键 ----------------
+   按住 Alt 浮出提示，继续按住并按对应键执行。动作分两类：
+   - 设置 / 主题 / 问候 / 整理 / 新增：直接执行（省一步）；
+   - 搜索 / 快捷方式：只把焦点送过去（后面还要打字 / 用方向键）。
+   键位与文案在 logic/keyHints.ts，提示气泡在 KeyHints.vue；这里只负责动作。 */
+const hintsVisible = ref(false)
+
+function focusPageStart() {
+  // 页面开头 = 第一个 Tab 停靠点（右上角「设置」）；从搜索框 Esc 出来后接着 Tab 不会掉回搜索框
+  settingsButton.value?.focus()
+}
+
+function toggleTheme() {
+  setTheme(isDark.value ? 'light' : 'dark')
+}
+
+async function startGreetingEdit() {
+  editingGreeting.value = true
+  await nextTick()
+  greetingInput.value?.focus()
+  greetingInput.value?.select()
+}
+
+const shortcutActions: Record<KeyHintAction, () => void> = {
+  settings: openOptionsPage,
+  theme: toggleTheme,
+  greeting: startGreetingEdit,
+  search: () => search.value?.focusInput(),
+  grid: () => shortcutGrid.value?.focusGrid(),
+  manage: () => shortcutGrid.value?.toggleEditing(),
+  add: () => shortcutGrid.value?.openCreate(),
+}
+
+function shortcutLocked() {
+  // 对话框 / 拖动期间把 Alt 导航让给当前交互；设置页等其它宿主不挂这些监听
+  return shortcutGrid.value?.isKeyboardLocked() ?? false
+}
+
+function onWindowKeydown(event: KeyboardEvent) {
+  if (
+    event.key === 'Tab'
+    && !event.altKey && !event.ctrlKey && !event.metaKey
+    && !shortcutLocked()
+    && pageHasNoFocusedControl()
+  ) {
+    // 焦点不在任何控件上（点空白处失焦）：Tab 先回到搜索框，见上面的注释
+    if (focusSearchFromBlank()) {
+      event.preventDefault()
+      return
+    }
+  }
+
+  if (event.key === 'Alt') {
+    if (event.repeat)
+      return
+    if (shortcutLocked()) {
+      hintsVisible.value = false
+      return
+    }
+    hintsVisible.value = true
+    // 按住 Alt 只用来提示，不应该同时把浏览器菜单叫起来
+    event.preventDefault()
+    return
+  }
+
+  if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey)
+    return
+  if (event.isComposing || event.repeat)
+    return
+
+  const hint = keyHints.find(item => item.key === event.key.toLowerCase())
+  if (!hint || shortcutLocked())
+    return
+
+  event.preventDefault()
+  shortcutActions[hint.action]()
+}
+
+function onWindowKeyup(event: KeyboardEvent) {
+  if (event.key !== 'Alt')
+    return
+  hintsVisible.value = false
+  event.preventDefault()
+}
+
+function hideHints() {
+  hintsVisible.value = false
+}
+
+function onVisibilityChange() {
+  if (document.hidden)
+    hideHints()
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', onWindowKeydown)
+  window.addEventListener('keyup', onWindowKeyup)
+  window.addEventListener('blur', hideHints)
+  document.addEventListener('visibilitychange', onVisibilityChange)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onWindowKeydown)
+  window.removeEventListener('keyup', onWindowKeyup)
+  window.removeEventListener('blur', hideHints)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
+})
 
 /* ---------------- 预置站点 ----------------
    首次安装的种子站点由 `defaultShortcuts()` 提供，且**只在 storage 里没有
@@ -105,8 +299,10 @@ function openOptionsPage() {
 
       <div class="masthead__controls">
         <button
+          ref="settingsButton"
           type="button"
           class="ghost-control focus-ring"
+          aria-keyshortcuts="Alt+S"
           data-test="open-options"
           @click="openOptionsPage"
         >
@@ -114,7 +310,7 @@ function openOptionsPage() {
           设置
         </button>
 
-        <div class="theme-switch" role="group" aria-label="主题">
+        <div class="theme-switch" role="group" aria-label="主题" aria-keyshortcuts="Alt+T">
           <button
             type="button"
             class="theme-switch__btn focus-ring"
@@ -161,6 +357,7 @@ function openOptionsPage() {
             title="点击编辑"
             tabindex="0"
             role="button"
+            aria-keyshortcuts="Alt+H"
             data-test="greeting"
             @click="editingGreeting = true"
             @keydown.enter.prevent="editingGreeting = true"
@@ -170,22 +367,31 @@ function openOptionsPage() {
           </div>
           <input
             v-else
+            ref="greetingInput"
             v-model="greeting"
             class="greeting-input"
             aria-label="编辑问候语"
+            aria-keyshortcuts="Alt+H"
             data-test="greeting-input"
             @blur="editingGreeting = false"
             @keyup.enter="editingGreeting = false"
           >
         </div>
 
-        <SearchBox autofocus />
+        <SearchBox
+          ref="search"
+          autofocus
+          tab-cycles-engines
+          @exit="focusPageStart"
+        />
       </section>
 
       <div class="shortcuts-band">
-        <ShortcutGrid />
+        <ShortcutGrid ref="shortcutGrid" keyboard-shortcuts />
       </div>
     </div>
+
+    <KeyHints :visible="hintsVisible" />
   </main>
 </template>
 

@@ -18,8 +18,13 @@ import type { Shortcut } from '~/logic/shortcuts'
  * 默认 false（同标签页），与新标签页上的搜索框保持一致。
  * 设置页 / 侧边栏传 true：那里同标签页跳转会把界面自己顶掉。
  */
-const props = withDefaults(defineProps<{ openInNewTab?: boolean }>(), {
+const props = withDefaults(defineProps<{
+  openInNewTab?: boolean
+  /** 新标签页传 true：启用 roving 方向键导航与 aria-keyshortcuts；设置页不传 */
+  keyboardShortcuts?: boolean
+}>(), {
   openInNewTab: false,
+  keyboardShortcuts: false,
 })
 
 const { list, add, update, remove, insertAt, move } = useShortcuts()
@@ -312,8 +317,182 @@ const displayed = computed(() => order.value ?? list.value)
 /** 拖动项在 displayed 里的下标，-1 表示当前没有拖动 */
 const dragIndex = ref(-1)
 const gridEl = ref<HTMLElement | null>(null)
+/** 空列表时 G 快捷键的落点 */
+const emptyAdd = ref<HTMLButtonElement | null>(null)
 /** 给读屏软件的播报（排序完成后念一遍新位置） */
 const announcement = ref('')
+
+/* ---------------------------------------------------------------
+   网格的方向键导航
+   ---------------------------------------------------------------
+   磁贴不是一排按钮，是二维格子；让 Tab 从第一颗走到最后一颗，会把
+   「用 Tab 走完整页」原样搬进网格。这里改成 roving tabindex：
+   - 普通模式：只有 activeCell 这一颗在 Tab 顺序里，Tab 进出网格；
+     ↑↓←→ 在格子间移动，Enter 打开。
+   - 编辑模式：磁贴面退出 Tab 顺序，只有 activeCell 那一颗的四个操作按钮
+     可 Tab；方向键仍可换格，换过去后 Tab 就进这一格的编辑按钮。
+   - 新增格也是可导航的一格；空列表时 G 落到空状态的「添加第一个」。
+   --------------------------------------------------------------- */
+const activeCell = ref(0)
+
+function gridCells(): HTMLElement[] {
+  return Array.from(gridEl.value?.querySelectorAll<HTMLElement>('.tile-cell') ?? [])
+}
+
+/** 用 offsetTop/offsetLeft 而不是 rect：入场/拖拽的 transform 不会把格子坐标带歪 */
+interface CellBox {
+  index: number
+  top: number
+  left: number
+  right: number
+  centerX: number
+}
+
+function cellBoxes(): CellBox[] {
+  return gridCells().map((cell, index) => {
+    const left = cell.offsetLeft
+    const width = cell.offsetWidth
+    return {
+      index,
+      top: cell.offsetTop,
+      left,
+      right: left + width,
+      centerX: left + width / 2,
+    }
+  })
+}
+
+/** 把格子按行分组；同一行的 top 允许一点误差 */
+function gridRows(boxes: CellBox[]): CellBox[][] {
+  const rows: CellBox[][] = []
+  for (const box of [...boxes].sort((a, b) => a.top - b.top || a.left - b.left)) {
+    const row = rows.find(items => Math.abs(items[0].top - box.top) <= 4)
+    if (row)
+      row.push(box)
+    else
+      rows.push([box])
+  }
+  for (const row of rows)
+    row.sort((a, b) => a.left - b.left)
+  return rows
+}
+
+function focusCell(index: number) {
+  const cell = gridCells()[index]
+  if (!cell)
+    return
+
+  activeCell.value = index
+  cell.querySelector<HTMLElement>('.tile-face, .add-tile')?.focus()
+}
+
+function focusGrid() {
+  if (displayed.value.length === 0) {
+    emptyAdd.value?.focus()
+    return
+  }
+
+  // 列表可能刚被删短；activeCell 指向新增格时也要落在最后一个合法位置
+  const index = Math.min(Math.max(activeCell.value, 0), displayed.value.length)
+  nextTick(() => focusCell(index))
+}
+
+function tileTabIndex(index: number) {
+  // 设置页沿用原来的 Tab 顺序；只有新标签页启用 roving
+  if (!props.keyboardShortcuts)
+    return editing.value ? -1 : 0
+  return editing.value ? -1 : (index === activeCell.value ? 0 : -1)
+}
+
+function onGridFocusIn(event: FocusEvent) {
+  if (!props.keyboardShortcuts)
+    return
+
+  const target = event.target as HTMLElement | null
+  const cell = target?.closest<HTMLElement>('.tile-cell')
+  if (!cell || !gridEl.value?.contains(cell))
+    return
+
+  const index = gridCells().indexOf(cell)
+  if (index !== -1)
+    activeCell.value = index
+}
+
+function onGridKeydown(event: KeyboardEvent) {
+  if (!props.keyboardShortcuts)
+    return
+  if (dialogOpen.value || session)
+    return
+  if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey)
+    return
+  if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key))
+    return
+
+  const target = event.target as HTMLElement | null
+  const cell = target?.closest<HTMLElement>('.tile-cell')
+  if (!cell || !gridEl.value?.contains(cell))
+    return
+
+  const cells = gridCells()
+  const current = cells.indexOf(cell)
+  if (current === -1)
+    return
+
+  const rows = gridRows(cellBoxes())
+  const rowIndex = rows.findIndex(row => row.some(box => box.index === current))
+  const row = rows[rowIndex]
+  if (!row)
+    return
+
+  const currentBox = row.find(box => box.index === current)
+  if (!currentBox)
+    return
+
+  let next: CellBox | undefined
+
+  if (event.key === 'ArrowLeft') {
+    const position = row.indexOf(currentBox)
+    next = row[position - 1]
+  }
+  else if (event.key === 'ArrowRight') {
+    const position = row.indexOf(currentBox)
+    next = row[position + 1]
+  }
+  else {
+    const nextRow = rows[rowIndex + (event.key === 'ArrowDown' ? 1 : -1)]
+    if (nextRow) {
+      next = nextRow.reduce((best, box) =>
+        Math.abs(box.centerX - currentBox.centerX) < Math.abs(best.centerX - currentBox.centerX) ? box : best,
+      )
+    }
+  }
+
+  if (!next)
+    return
+
+  event.preventDefault()
+  focusCell(next.index)
+}
+
+/** 列表变短时把 activeCell 收到合法范围（新增格的 index 是长度本身） */
+watch(() => displayed.value.length, (length) => {
+  if (activeCell.value > length)
+    activeCell.value = length
+})
+
+/** M 键：切换整理模式；切完把焦点交给网格，下一步就能用方向键 / Tab */
+function toggleEditing() {
+  if (displayed.value.length === 0)
+    return
+
+  editing.value = !editing.value
+  nextTick(() => focusGrid())
+}
+
+/** 对话框 / 拖动期间，Alt 区块快捷键与提示都要让路 */
+function isKeyboardLocked() {
+  return dialogOpen.value || session !== null
+}
 
 function announce(text: string) {
   announcement.value = text
@@ -323,6 +502,8 @@ function announce(text: string) {
 function moveTo(from: number, to: number) {
   const item = list.value[from]
   move(from, to)
+  // 焦点跟着这颗磁贴走：roving tabindex 的 active 格也要落到新位置
+  activeCell.value = to
   if (item)
     announce(`「${item.name}」已移到第 ${to + 1} 位`)
 }
@@ -1276,10 +1457,23 @@ watch(list, (value) => {
   else
     emptyEntering.value = false
 }, { immediate: true })
+
+/* 新标签页的 Alt 区块快捷键从这里进入；设置页不用这些入口 */
+defineExpose({
+  focusGrid,
+  toggleEditing,
+  openCreate,
+  isKeyboardLocked,
+})
 </script>
 
 <template>
-  <section class="grid-root" :class="{ 'is-waved': waveStarted }" aria-labelledby="shortcuts-heading">
+  <section
+    class="grid-root"
+    :class="{ 'is-waved': waveStarted }"
+    aria-labelledby="shortcuts-heading"
+    :aria-keyshortcuts="keyboardShortcuts ? 'Alt+G' : undefined"
+  >
     <div class="grid-head" :class="{ 'is-entering': waveStarted }">
       <h2 id="shortcuts-heading" class="grid-title">
         快捷方式
@@ -1292,6 +1486,7 @@ watch(list, (value) => {
         type="button"
         class="grid-edit focus-ring"
         :aria-pressed="editing"
+        :aria-keyshortcuts="keyboardShortcuts ? 'Alt+M' : undefined"
         data-test="toggle-edit"
         @click="editing = !editing"
       >
@@ -1316,7 +1511,14 @@ watch(list, (value) => {
       <p class="empty-hint">
         把你每天都要打开的站点放上来，也可以随时按 <kbd class="kbd">N</kbd> 添加
       </p>
-      <button type="button" class="primary-control" data-test="empty-add" @click="openCreate">
+      <button
+        ref="emptyAdd"
+        type="button"
+        class="primary-control"
+        :aria-keyshortcuts="keyboardShortcuts ? 'Alt+N' : undefined"
+        data-test="empty-add"
+        @click="openCreate"
+      >
         添加第一个
       </button>
     </div>
@@ -1327,6 +1529,8 @@ watch(list, (value) => {
       class="tile-grid"
       :class="{ 'is-sorting': dragIndex !== -1 }"
       data-test="shortcut-grid"
+      @keydown="onGridKeydown"
+      @focusin="onGridFocusIn"
     >
       <li
         v-for="(shortcut, index) in displayed"
@@ -1352,6 +1556,8 @@ watch(list, (value) => {
           :index="index"
           :total="displayed.length"
           :open-in-new-tab="openInNewTab"
+          :tab-index="tileTabIndex(index)"
+          :active="!keyboardShortcuts || index === activeCell"
           @move="moveTo"
           @edit="openEdit"
           @remove="removeWithUndo"
@@ -1368,6 +1574,8 @@ watch(list, (value) => {
           type="button"
           class="add-tile focus-ring"
           aria-label="添加快捷方式"
+          :tabindex="!keyboardShortcuts ? 0 : (activeCell === displayed.length ? 0 : -1)"
+          :aria-keyshortcuts="keyboardShortcuts ? 'Alt+N' : undefined"
           data-test="add-shortcut"
           @click="openCreate"
         >

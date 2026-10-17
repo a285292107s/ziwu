@@ -123,29 +123,75 @@
 
 ### 多引擎搜索框
 
-![搜索框与引擎下拉](./docs/search-dropdown.png)
+![按 Tab 展开的引擎气泡环](./docs/search-ring.png)
 
 内置 **Google、百度、Bing、DuckDuckGo、知乎、哔哩哔哩、GitHub** 七个引擎，全部定义在 `src/logic/searchEngines.ts` 的 `searchEngines` 数组里，增删改都只动这一处。
 
+新标签页的搜索框左侧始终是**当前引擎气泡**。引擎环默认收起；按 <kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd> 才展开其余引擎气泡，所有气泡同向转一格，下一个引擎转到锚点；图标始终保持正立。停止按 <kbd>Tab</kbd> 后短暂停留，环会从锚点向外轻轻散开、模糊淡出，只留下左侧那颗当前引擎气泡；输入、打开下拉或焦点离开搜索框也会提前收起。窗口不够宽（或不够高）时环直接不展示，只保留当前引擎气泡和完整下拉列表。
+
 | 操作 | 效果 |
 | --- | --- |
-| 点输入框左侧图标 | 展开引擎列表，点选切换 |
-| 输入框内按 <kbd>Tab</kbd> | 依次轮换引擎，走完一轮后焦点交给浏览器（下一个是搜索按钮，再往下是磁贴） |
-| 输入框内按 <kbd>Shift</kbd>+<kbd>Tab</kbd> | 反向轮换；走回起点后焦点退回引擎按钮 |
+| 点搜索框左侧的当前引擎气泡 | 展开完整引擎列表（带名字），点选切换 |
+| 输入框内按 <kbd>Tab</kbd> | 展开引擎环并永久轮换到下一个引擎，环整体转一格；焦点留在输入框 |
+| 输入框内按 <kbd>Shift</kbd>+<kbd>Tab</kbd> | 展开引擎环并永久反向轮换；同样不把焦点交给页面 |
+| 环展开时点其他引擎气泡 | 直接切换到该引擎；随后环收起 |
+| 输入框内按 <kbd>Esc</kbd> | 三级出口：先关引擎列表 → 再清空输入 → 最后把焦点交给页面开头 |
 | 输入关键词后回车 / 点右侧按钮 | 用当前引擎搜索 |
 | 回车时按住 <kbd>Ctrl</kbd> / <kbd>⌘</kbd>，或中键点搜索按钮 | 在新标签页打开 |
+
+![打开完整引擎列表](./docs/search-dropdown.png)
 
 > **输入法组词期间不抢按键**：`onKeydown` 开头会检查 `event.isComposing`。
 > 拼音候选词要靠回车确认、Esc 取消，组词中如果照常处理，用户打「知乎」敲回车选词
 > 就会被直接送去搜索。中文是这里的默认输入场景，这条不能省。
 
-> **焦点出口**：因为 <kbd>Tab</kbd> 被「切引擎」占用，输入框里按 <kbd>Tab</kbd> 不会立刻移动焦点。
-> 出口有两个：正向轮换完一轮后放行，或者用 <kbd>Shift</kbd>+<kbd>Tab</kbd> 反向走回起点。
-> 判断 `preventDefault()` 必须放在「确定要拦截」之后，否则出口那一次 Tab 既没轮换、也没移动焦点。
+> **焦点出口**：输入框里的 <kbd>Tab</kbd> 只负责切引擎，不再把焦点送出搜索框；正向、反向都无限循环。
+> 离开靠 <kbd>Esc</kbd>（关列表 → 清输入 → 交回页面开头），或能把焦点带走的 Alt 区块快捷键（<kbd>S</kbd> / <kbd>G</kbd> / <kbd>H</kbd>）。
+> 引擎列表仍可用输入框里的 <kbd>↓</kbd>/<kbd>↑</kbd>/<kbd>Enter</kbd> 打开和选择。
+>
+> 环上的气泡**不进 Tab 顺序**：`tabindex="-1"`，键盘用户用输入框里的 <kbd>Tab</kbd> 轮换；
+> 环展开时，鼠标点环上任意非当前气泡是直接切换的快捷方式。
+
+> **从浏览器界面进入页面时，第一站是搜索框**：新标签页打开时焦点在地址栏，用户按 <kbd>Tab</kbd>
+> 进页面——原生顺序会先撞上右上角的「设置」。这一页的主操作是搜索，所以第一次从页面外送进来的
+> 键盘焦点会被交给搜索框（初始 `autofocus` 也指向同一个位置）。只接管第一次：之后搜索框内的
+> <kbd>Tab</kbd> 永久切引擎，页面其它区域靠 <kbd>Esc</kbd> 离开搜索框或 Alt 区块快捷键到达。
+> 识别方式是 focusin 的 `relatedTarget === null` + `:focus-visible`，鼠标点击不会被拽走。
+> 点页面空白处失焦后焦点不在任何控件上，此时 <kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd>
+> 也会先回到搜索框，而不是从点击位置继续落到问候语或设置；焦点已经在某个控件上时仍走原生顺序。
+> 见 [NewTab.vue](src/newtab/NewTab.vue)。
+
+> **打开时静默，用起来才亮**：`autofocus` 让输入框打开就能打字，但搜索框的青色焦点高亮
+> **不**在加载时出现——否则每次开页最亮的视觉元素会变成搜索框外那一圈光，和时钟抢主角。
+> 用户一动手（输入 / 点击输入框 / 从页面外 <kbd>Tab</kbd> 进来）高亮才亮起；键盘用户的
+> 焦点可见性不打折。输入框的 `:focus-visible` 恒为真，所以这个区分只能由组件状态做，
+> 见 [SearchBox.vue](src/components/SearchBox.vue) 的 `engaged`。
 
 选中结果写入 `browser.storage.local` 的 `meridiem-search-engine`，因此**多个新标签页之间自动同步**：一个标签页切到知乎，其他已打开的新标签页跟着变。
 
 默认是**当前标签页内跳转**（和 Chrome 地址栏一致）。新标签页里的磁贴同理——不写 `target`，所以 <kbd>Ctrl</kbd> / 中键点击天然是新标签页。而**设置页和侧边栏**里的磁贴显式传了 `open-in-new-tab`，因为在那些界面上同页跳转会把设置页/侧边栏本身顶掉；设置页里那个「试一下」的搜索框预览同理传了 `open-in-new-tab`。
+
+### 键盘导航
+
+![按住 Alt 的区块快捷键提示](./docs/keyboard-hints.png)
+
+搜索框聚焦时，<kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd> 只负责前后轮换引擎气泡，**不再把焦点送出搜索框**（正向、反向都永久循环）；离开搜索框用 <kbd>Esc</kbd>（关列表 → 清输入 → 回到页面开头）或能把焦点带走的 Alt 区块快捷键。焦点已经在页面某个控件上时，搜索框之外的 <kbd>Tab</kbd> 仍是浏览器原生焦点顺序，作为兜底路径保留；点在空白处、焦点不在任何控件上时，<kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd> 先回到搜索框。
+
+**按住 <kbd>Alt</kbd>** 时，页面各区块旁会浮出键帽提示；继续按住并按对应键即可跳转 / 执行，松开 <kbd>Alt</kbd> 提示消失。提示只贴**当前视口里看得见**的区块：磁贴多到换行、末尾「新增」格被挤出屏幕时，不会出现它的键帽。
+
+| 键 | 区块 | 按下后 |
+| --- | --- | --- |
+| <kbd>Alt</kbd>+<kbd>S</kbd> | 页眉 · 设置 | 打开设置页 |
+| <kbd>Alt</kbd>+<kbd>T</kbd> | 页眉 · 主题 | 切换浅色 / 深色 |
+| <kbd>Alt</kbd>+<kbd>H</kbd> | 问候语 | 聚焦并进入编辑 |
+| <kbd>Alt</kbd>+<kbd>/</kbd> | 搜索框 | 聚焦输入框 |
+| <kbd>Alt</kbd>+<kbd>G</kbd> | 快捷方式区 | 聚焦网格 |
+| <kbd>Alt</kbd>+<kbd>M</kbd> | 快捷方式 · 整理 | 切换整理模式并聚焦网格 |
+| <kbd>Alt</kbd>+<kbd>N</kbd> | 快捷方式 · 新增 | 打开新增对话框（普通 <kbd>N</kbd> 仍在） |
+
+快捷方式网格内部用方向键而不是 <kbd>Tab</kbd> 逐颗走：<kbd>G</kbd> 聚焦网格后，<kbd>↑</kbd><kbd>↓</kbd><kbd>←</kbd><kbd>→</kbd> 在磁贴与末尾的新增格之间移动，<kbd>Enter</kbd> 打开 / 触发；普通模式下网格只有一个 Tab 停靠点，<kbd>Tab</kbd> 直接进出网格。整理模式下 <kbd>M</kbd> 或 <kbd>G</kbd> 聚焦当前磁贴后，<kbd>Tab</kbd> 进入这一颗的编辑 / 删除 / 排序按钮，方向键换格。
+
+键位按 **Chrome 优先**选，避开了 <kbd>Alt</kbd>+<kbd>E</kbd>/<kbd>F</kbd>/<kbd>D</kbd> 和 <kbd>Alt</kbd>+数字。对话框打开或拖动磁贴时，Alt 导航和提示都会让路；这套键盘模型只在新标签页生效——设置页里的搜索框预览和快捷方式网格保持原生 <kbd>Tab</kbd> 顺序，也不会出现 Alt 提示。
 
 ### 快捷方式图标
 
@@ -261,6 +307,7 @@ node scripts/sky-rows.mjs 2026-06-21T12:00 light r10    # 逐行量 RGB
 
 # —— 行为核对（真的点、真的拖）——
 node --no-experimental-require-module scripts/verify-tile-click.mjs     # 磁贴各条点击路径（不通过则退出码 1）
+node --no-experimental-require-module scripts/verify-first-tab.mjs      # 进入页面第一站 / 空白处失焦后 Tab 回搜索框（同上）
 node --no-experimental-require-module scripts/verify-no-injected-ui.mjs # 证明没往普通网页注入东西（同上）
 node --no-experimental-require-module scripts/verify-tile-actions.mjs   # 整理模式四个按钮的排布与提示（只打 JSON 报告）
 node --no-experimental-require-module scripts/verify-local-sites.mjs    # 导出/导入备份全链路（不通过则退出码 1）
