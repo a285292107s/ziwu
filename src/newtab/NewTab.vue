@@ -2,6 +2,7 @@
 import { computed, onUnmounted, ref } from 'vue'
 import SkyBackdrop from '~/components/SkyBackdrop.vue'
 import { paletteFor, phaseForHour } from '~/logic/ambience'
+import { PAGE_BEAT_MS } from '~/logic/motion'
 import { parseSkyOverride } from '~/logic/sky'
 import { useTheme } from '~/composables/useTheme'
 import { greeting } from '~/logic/storage'
@@ -52,6 +53,15 @@ const backdropStyle = computed(() => ({
   '--amb-glow': palette.value.glow,
 }))
 
+/**
+ * hero 的入场拍子交给 CSS：延迟写成 `calc(var(--beat) * n)`。
+ *
+ * 节拍本身在 logic/motion.ts —— 磁贴带的起波也取同一个值（见 ShortcutGrid.vue
+ * 的 BAND_START_MS）。两处若各写一份延迟，就会重演「一份编排两套时间轴」：
+ * hero 在首帧起算、磁贴带却跟着 storage 的往返漂。
+ */
+const beatStyle = { '--beat': `${PAGE_BEAT_MS}ms` }
+
 /* ---------------- 问候语就地编辑 ---------------- */
 const editingGreeting = ref(false)
 
@@ -72,7 +82,7 @@ function openOptionsPage() {
 <template>
   <main
     class="newtab-root"
-    :style="backdropStyle"
+    :style="[backdropStyle, beatStyle]"
     :data-phase="phase"
   >
     <!-- 天光背景层：WebGL2 大气散射，带 CSS 兜底与可读性薄膜。
@@ -375,7 +385,7 @@ function openOptionsPage() {
 /* ---- 问候语 ---- */
 .greeting-block {
   margin-top: 0.7rem;
-  animation: rise-in var(--dur-enter) var(--ease-out) 60ms both;
+  animation: rise-in var(--dur-enter) var(--ease-out) calc(var(--beat) * 1) both;
 }
 
 .greeting {
@@ -422,7 +432,7 @@ function openOptionsPage() {
    它内部 position:absolute 的引擎下拉就会被压在后面的磁贴带下面
    （截图里能看到磁贴从菜单里透出来）。挂在没有子级浮层的 .search-shell 上就没这个问题。 */
 .hero :deep(.search-shell) {
-  animation: rise-in var(--dur-enter) var(--ease-out) 120ms both;
+  animation: rise-in var(--dur-enter) var(--ease-out) calc(var(--beat) * 2) both;
 }
 
 .hero :deep(.search-root) {
@@ -434,10 +444,10 @@ function openOptionsPage() {
    曾经挂过一层延迟后开始的 rise-in（`both` 填充让整块先隐身后升起），它顺手把
    磁贴各自的错峰整个盖住了 —— 磁贴的动画在幕布后面就跑完了，
    用户看到的其实是「整块一起升起」。
-   现在的编排是逐格斜向波（常量见 ShortcutGrid.vue，不要在别处复述），
-   幕布也改由 ShortcutGrid 自己按「真列表是否就位」控制：storage 异步回来后列表会被
-   整份替换，用固定计时器当幕布会在慢机器上露出「种子站 → 用户磁贴」那一下。
-   见 components/ShortcutGrid.vue 的 startTileWave()。 */
+   现在磁贴带自己在 hero 第三拍起波（同一份节拍见 logic/motion.ts），
+   每行退开一拍、每格竖直沉落；常量与理由都在 components/ShortcutGrid.vue。
+   幕布也由 ShortcutGrid 自己按「真列表是否就位」控制：storage 异步回来后列表会被
+   整份替换，用固定计时器当幕布会在慢机器上露出「种子站 → 用户磁贴」那一下。 */
 
 /* ---------------------------------------------------------------
    响应式

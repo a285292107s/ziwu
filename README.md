@@ -313,6 +313,7 @@ mytab/
 │   │   ├── searchEngines.ts  # 引擎目录 + 纯函数
 │   │   ├── shortcuts.ts      # URL 规范化、配色分配、字号
 │   │   ├── faviconCache.ts   # 站点图标的持久化缓存（localStorage，同步可读）
+│   │   ├── motion.ts         # 全页动效节拍（hero 与磁贴带的共享常量）
 │   │   ├── ambience.ts       # 天光的 CSS 兜底调色板
 │   │   ├── defaultSites.ts   # 通用站点种子（不含任何个人信息）
 │   │   ├── transfer.ts       # 子午备份格式：构建 / 序列化 / 解析校验（纯函数）
@@ -368,6 +369,21 @@ mytab/
 `animation: ... both` 会让动画结束后**依然保留 transform 的已结束状态**，而带 `transform` 的元素自成一格层叠上下文。曾经把 `.search-root` 挂上入场动画，结果它内部 `position: absolute` 的引擎下拉被压在后面的磁贴带下面（截图里能看到磁贴从菜单里透出来）。
 
 所以入场动画挂在 `.search-shell` / `.grid-root` 这类**没有子级浮层**的元素上。
+
+### 入场编排共用一套节拍
+
+新标签页的入场是一条时间轴：时钟 → 问候 → 搜索框 → 磁贴带。节拍只有一个来源，
+即 [logic/motion.ts](src/logic/motion.ts) 的 `PAGE_BEAT_MS`：hero 的第 n 拍由 CSS 的
+`calc(var(--beat) * n)` 取（`--beat` 由 NewTab.vue 注入），磁贴带的起波锚点是同一个常量的倍数。
+
+**磁贴带的起波时刻不能跟着 `chrome.storage` 的往返走。** 实测那样同一份构建每次打开都会落在
+hero 的不同拍子上（有时早于时钟自己的动画）。数据就绪只当**下限**：锚点之后才到的数据立刻起跑，
+见 [ShortcutGrid.vue](src/components/ShortcutGrid.vue) 的 `scheduleTileWave()`。
+
+磁贴带内部：行 = 一拍（磁贴多到换行、或窗口收窄到侧边栏那种宽度时才读得出自上而下的层积），
+行内只留一点点错开；每格的动作是竖直沉落 + 图标合焦 + 站名收尾——方向和 hero 一致、幅度更小。
+**配角不能比主角响**，这一条比「波前好不好看」优先。完整的诊断、参数取值的理由与前后实测，
+记在评审轮次 `docs/review/g1-settle.md`（评审产物不进仓库，见 `.gitignore`）。
 
 ### 深色样式必须写在 `src/styles/main.css`，不能写在 `<style scoped>` 里
 
