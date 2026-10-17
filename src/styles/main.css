@@ -106,11 +106,33 @@
 
   /* 切主题时跟着一起走的颜色（见下面 @property 的注释）。
      时长与渲染器里的 THEME_BLEND_MS 保持一致 —— 水在那段时间里沉下去，
-     压在水上的薄膜和暗角也走完同一段，合成画面才是一条连续的曲线。 */
+     压在水上的薄膜、暗角和所有界面颜色也走完同一段，合成画面才是一条连续的曲线。 */
   transition:
     --veil-color-strong 1200ms var(--ease-in-out),
     --veil-color-soft 1200ms var(--ease-in-out),
-    --bg-deep 1200ms var(--ease-in-out);
+    --bg-deep 1200ms var(--ease-in-out),
+    --bg-base 1200ms var(--ease-in-out),
+    --surface 1200ms var(--ease-in-out),
+    --surface-strong 1200ms var(--ease-in-out),
+    --surface-control 1200ms var(--ease-in-out),
+    --surface-sunken 1200ms var(--ease-in-out),
+    --surface-hover 1200ms var(--ease-in-out),
+    --text-1 1200ms var(--ease-in-out),
+    --text-2 1200ms var(--ease-in-out),
+    --text-3 1200ms var(--ease-in-out),
+    --text-on-accent 1200ms var(--ease-in-out),
+    --seconds 1200ms var(--ease-in-out),
+    --line 1200ms var(--ease-in-out),
+    --line-strong 1200ms var(--ease-in-out),
+    --line-inset 1200ms var(--ease-in-out),
+    --brand 1200ms var(--ease-in-out),
+    --brand-hover 1200ms var(--ease-in-out),
+    --brand-vivid 1200ms var(--ease-in-out),
+    --brand-soft 1200ms var(--ease-in-out),
+    --brand-ring 1200ms var(--ease-in-out),
+    --focus 1200ms var(--ease-in-out),
+    --tile-ink 1200ms var(--ease-in-out),
+    --scrim 1200ms var(--ease-in-out);
 }
 
 /* ---------- 主题切换时的颜色过渡 ----------
@@ -124,7 +146,14 @@
 
    把颜色注册成 `<color>` 之后它们就可以被 transition 了：变量在 `<html>` 上平滑地走，
    用变量算出来的 gradient 跟着一帧一帧重画。不支持 @property 的浏览器退回原来的
-   瞬切，没有副作用。 */
+   瞬切，没有副作用。
+
+   **界面颜色（文字、玻璃、描边、品牌色）走的是同一段时钟。** 之前它们在一帧里翻完，
+   而水要 1.2 秒才沉下去：浅→深的前半段是「浅色字压着还很亮的水」，
+   深→浅反过来是「深色字压着还很暗的水」，中间约一秒是最难读的。
+   实测截图（docs/review/theme-base/）里，切主题那一帧的钟点几乎消失在背景里 ——
+   原因就是文字已经变成终点色、背景还停在起点。让它们跟水一起走之后，
+   文字与它脚下那片水始终保持同一段过渡曲线上的对应关系。 */
 @property --veil-color-strong {
   syntax: '<color>';
   inherits: true;
@@ -141,6 +170,138 @@
   syntax: '<color>';
   inherits: true;
   initial-value: #e8edf2;
+}
+
+@property --bg-base {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #f6f8fa;
+}
+
+@property --surface {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: rgb(255 255 255 / 0.72);
+}
+
+@property --surface-strong {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: rgb(255 255 255 / 0.9);
+}
+
+@property --surface-control {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: rgb(255 255 255 / 0.86);
+}
+
+@property --surface-sunken {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: rgb(15 23 42 / 0.04);
+}
+
+@property --surface-hover {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: rgb(255 255 255 / 0.98);
+}
+
+@property --text-1 {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #101820;
+}
+
+@property --text-2 {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #38444f;
+}
+
+@property --text-3 {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #3a444d;
+}
+
+@property --text-on-accent {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #ffffff;
+}
+
+@property --seconds {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #0a544e;
+}
+
+@property --line {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: rgb(16 24 32 / 0.09);
+}
+
+@property --line-strong {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: rgb(16 24 32 / 0.16);
+}
+
+@property --line-inset {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: rgb(255 255 255 / 0.72);
+}
+
+@property --brand {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #0f766e;
+}
+
+@property --brand-hover {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #115e59;
+}
+
+@property --brand-vivid {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #0d9488;
+}
+
+@property --brand-soft {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: rgb(13 148 136 / 0.1);
+}
+
+@property --brand-ring {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: rgb(13 148 136 / 0.28);
+}
+
+@property --focus {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #0d9488;
+}
+
+@property --tile-ink {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #ffffff;
+}
+
+@property --scrim {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: rgb(4 6 10 / 0.5);
 }
 
 /* ---------- 浅色主题 ---------- */

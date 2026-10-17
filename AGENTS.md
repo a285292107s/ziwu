@@ -78,6 +78,11 @@ node --no-experimental-require-module scripts/contrast-audit.mjs   # WCAG 对比
 node --no-experimental-require-module scripts/sky-shots.mjs <轮次> [--season=winter] [--themes=dark] [--only=12,19.6]
 node --no-experimental-require-module scripts/sky-layers.mjs <轮次> <时刻> [light|dark]   # 拆层：-final/-raw/-nogl
 node --no-experimental-require-module scripts/sky-rows.mjs <时刻> [light|dark] [轮次]     # 逐行量 RGB
+
+# 主题过渡（要在真机的中间帧里看，稳态截图表象不出来）
+node --no-experimental-require-module scripts/theme-transition.mjs <轮次> [--from=light] [--to=dark,light] [--screencast=1]
+#   → docs/review/<轮次>/trace-*.json（逐帧像素时间线：单帧跳变占比、走完 95% 的时刻）
+#   → --screencast=1 收带真实时间戳的帧（默认只量不拍）
 ```
 
 截图产物落在 `docs/review/<轮次>/`。

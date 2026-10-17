@@ -323,28 +323,61 @@ function acesInv(y: number): number {
  * **只有两套主题真的不同的量会动。** 太阳 / 月亮的位置、`scatterNorm`、
  * 水的消光与散射系数都是天文量或常量，两帧里本来就一样，插了也是原地不动。
  *
- * 离散量（`dark` / `phase` / `timeMs`）一律取目标帧的：插值一个
- * 布尔值或时刻没有意义。
+ * 离散量（`dark` / `phase` / `timeMs`）一律取目标帧的：插值一个布尔值或时刻没有意义。
  *
- * **纯亮度乘子走对数插值**（`exposure`、`targetLuminance`）：这两个量是
- * 「亮多少倍」的描述，等比变化在视觉上才是匀速的。线性插值会让暗的那一端
- * 变化过快。其余量线性插值 —— 两端一阶导为零的平滑由调用方给的 k 负责
- * （smootherstep），这里只做混合。
+ * 三类量三种混法，理由都写在下面两个常量旁。
  */
-const GEOMETRIC_KEYS = new Set(['exposure', 'targetLuminance'])
+const GEO_KEYS = new Set([
+  'exposure',
+  'targetLuminance',
+  /* 辐射量：它们描述的是「走完某段水程之后还剩多少光」，真实路径是
+     Beer–Lambert 的指数衰减（exp(-σ·depth)），透射率正是逐通道的指数。
+     在 RGB 上线性插一条指数曲线，中段会系统性偏高、偏灰绿 —— 浅→深和深→浅
+     都会经过一段「不是两片水里任何一片」的颜色。逐通道取几何平均，
+     等价于把深度轴走成对数尺，中段色相才落在物理路径上。 */
+  'scatterTint',
+  'skyAbove',
+  'beamTint',
+  /* 同属「乘性强度」：等比例变化才是视觉匀速，线性插会让暗端变化过快。 */
+  'caustic',
+  'beamPower',
+  'ambPower',
+  'surfaceGlow',
+])
 
 /**
- * 沙面这个量不能线性插值。
- *
- * `floorDrop` 是「沙在相机下方多少米」，0 表示**没有底**。线性地走到 0
- * 等于让沙面一边靠近一边变亮，然后在最后一刻凭空消失 —— 亮度上是一次**尖峰**。
- *
- * 所以过渡期间取两端里「有沙」的那一侧：水一边加深，透过来的光
- * 按 Beer–Lambert 指数衰减，沙自己就暗下去了 —— 而深度到位之后再让沙消失，
- * 它那时的贡献已经被水吃掉，看不出来。反过来深→浅也一样：沙一开始就在，
- * 水变浅的过程中它自己亮起来，中间没有任何突变。
+ * 沙面这个量单独混（`floorDrop` 是「沙在相机下方多少米」，0 表示没有底）。
+ * 怎么混、为什么不取两端里的「有沙侧」，见下面 FLOOR_FAR 那段。
  */
 const FLOOR_KEYS = new Set(['floorDrop'])
+
+/**
+ * 沙面（`floorDrop`）在过渡里的走法。
+ *
+ * 0 表示**没有底**。不能线性走到 0：那样沙面一边靠近一边变亮、最后一刻凭空消失。
+ * 也不能像上一版那样取 max()：浅→深的整段里沙一直停在 1.6m，直到过渡结束那一帧
+ * 才归零 —— 实测那一帧画面下半幅亮度直接掉一个台阶（整幅均值单帧变化 46%），
+ * 深→浅则在**第一帧**把沙凭空长出来（44%）。两头都是硬切，只是藏在了过渡的两端。
+ *
+ * 现在的做法：把「没有底」当成一个**很远**的底（FAR），让距离连续地走过去。
+ * 沙的亮度本来就按 Beer–Lambert 随水程指数衰减 —— 距离一远，它自己就暗没了；
+ * 视线在沙上的终止距离同时连续地拉远，体积积分也从「只走一米多」平滑地接到
+ * 「整段水体」。两头都不需要额外的淡出参数，路径本身就是连续的。
+ * 光的衰减是指数的，所以这个过渡在前半段变化快、后半段几乎是平的 ——
+ * 那正是「沙先暗下去，水深到位」的物理顺序。
+ */
+const FLOOR_FAR = 40
+
+function mixScalar(key: string, a: number, b: number, k: number): number {
+  if (FLOOR_KEYS.has(key)) {
+    const aa = a > 0 ? a : FLOOR_FAR
+    const bb = b > 0 ? b : FLOOR_FAR
+    return aa + (bb - aa) * k
+  }
+  if (GEO_KEYS.has(key) && a > 0 && b > 0)
+    return a * (b / a) ** k
+  return a + (b - a) * k
+}
 
 function mixFrame(from: SkyFrame, to: SkyFrame, k: number): SkyFrame {
   const out: Record<string, unknown> = { ...to }
@@ -353,15 +386,10 @@ function mixFrame(from: SkyFrame, to: SkyFrame, k: number): SkyFrame {
     const a = src[key]
     const b = out[key]
     if (typeof a === 'number' && typeof b === 'number') {
-      if (FLOOR_KEYS.has(key))
-        out[key] = Math.max(a, b)
-      else if (GEOMETRIC_KEYS.has(key) && a > 0 && b > 0)
-        out[key] = a * (b / a) ** k
-      else
-        out[key] = a + (b - a) * k
+      out[key] = mixScalar(key, a, b, k)
     }
     else if (Array.isArray(a) && Array.isArray(b) && a.length === b.length) {
-      out[key] = (b as number[]).map((v, i) => (a as number[])[i] + (v - (a as number[])[i]) * k)
+      out[key] = (b as number[]).map((v, i) => mixScalar(key, (a as number[])[i], v, k))
     }
   }
   return out as unknown as SkyFrame
@@ -617,22 +645,22 @@ export function createSkyRenderer(
   let blendFrom: SkyFrame | null = null
   let blendStart = 0
   /**
-   * 过渡期间「曝光 × 增益」这个乘积的起点与终点。
+   * 过渡期间「曝光 × 增益」的乘积：从起点几何地走到终点。
    *
-   * 两个 uniform 都是线性乘子，所以乘积是一个**场景无关**的量：它描述的是
-   * 「这一片水需要多少倍增益」，与曝光常数怎么分配无关。过渡期间让乘积从
-   * 当前值几何地走到终点值、再由它反解增益，好处是：
-   *   1. 亮度不会因为两个乘子各按各的节奏走而先亮一下再暗下去；
-   *   2. 终点可以取**上一个主题真正收敛到的那个乘积**（productMemory），
-   *      于是过渡结束时就落在正确曝光上，不用等闭环再爬一段。
-   * 没有记忆时（本次会话第一次切到那个主题）退回「乘积不变」，
-   * 残差交给过渡结束后的快档探测。
+   * 乘积是**场景无关**的量（两个 uniform 都是线性乘子），所以它适合当过渡的骨架；
+   * 而终点的乘积不是估出来的 —— 过渡开始的那一帧会**真画一次终点帧再回读像素**，
+   * 反解出终点需要的增益（见 measureTargetGain）。上一版用「上一次收敛的乘积」
+   * 或「乘积不变」当终点，第一次切到某个主题时终点是错的，过渡结束后的闭环
+   * 只能把误差补回来，于是画面先沉到底再浮起来。
    */
   let blendProductFrom = 1
   let blendProductTo = 1
+  /** 本次过渡的终点曝光还没量过（见 measureTargetGain） */
+  let blendMeasurePending = false
   /**
    * 每个主题最近一次收敛（闭环落在滞回带内）时的「曝光 × 增益」。
-   * 换主题时用它当过渡终点 —— 见 blendProductFrom 的注释。
+   * 只有 `prefers-reduced-motion`（没有过渡、一帧到位）才拿它直接预置增益 ——
+   * 正常过渡的终点是量出来的，不靠这个记忆。
    */
   const productMemory = new Map<boolean, number>()
   /**
@@ -754,14 +782,14 @@ export function createSkyRenderer(
    * 用 p90 而不是 max 当「最亮」：月亮和星点是小面积高光，让它们决定整片天的曝光是错的
    * —— 但它们也不该被无视，所以 max 一并回报出去。
    */
-  function probe() {
+  function probe(measureOnly = false): SkyProbe | null {
     if (!frame)
-      return
+      return null
 
     const w = canvas.width
     const h = canvas.height
     if (w < 4 || h < 4)
-      return
+      return null
 
     const size = 4 * w * h
     if (probePixels.length !== size)
@@ -799,7 +827,7 @@ export function createSkyRenderer(
       }
     }
     if (samples.length < 8 || textSamples.length < 8)
-      return
+      return null
 
     const quantiles = (list: number[], q: number) =>
       list[Math.min(list.length - 1, Math.floor(list.length * q))]
@@ -888,17 +916,21 @@ export function createSkyRenderer(
         adapt: adaptNote,
       },
     }
+    /* **只量不算**：主题过渡开始时用它测一下「终点帧大概需要多少增益」，
+       见 measureTargetGain。那时画面上显示的不是这一帧，所以既不能发布探针，
+       也不能改增益。 */
+    if (measureOnly)
+      return stats
+
     options.onProbe?.(stats)
 
     if (!autoExposure)
-      return
+      return stats
 
-    /* 过渡期间不纠正：那时量到的亮度是插值路径上的中间态，拿它去驱动力增益
-       等于自己跟自己较劲（过渡曲线会被闭环拽歪），而且还会把中间态的乘积
-       写进 productMemory。探针照常回报 —— 薄膜和外部诊断要看它。
-       过渡一结束（renderFrame 里）节奏会被重置，残差用快档收掉。 */
+    /* 过渡期间不走闭环：过渡的曝光终点由**量出来的终点帧**决定（见 measureTargetGain），
+       闭环在这段时间只负责按那条曲线把增益走完。探针照常回报 —— 薄膜和外部诊断要看它。 */
     if (blendFrom)
-      return
+      return stats
 
     /**
      * 闭环曝光。**带滞回的区间调节**：低于下限才抬，高于上端才压，带内一律不动。
@@ -932,8 +964,14 @@ export function createSkyRenderer(
      *
      * 误差**必须在场景空间里算**（先 ACES 反变换再比），理由见 acesInv 的注释。
      */
-    /* **设定值仍取 `frame`（目标主题）。** 过渡期间闭环是停的（上面的 return），
-       所以这里不需要跟着插值帧走；等过渡结束，它面对的已经是终点画面了。 */
+    /* **过渡期间闭环停摆，但终点曝光是量出来的。**
+       上一版直接在这里 return，画面在 1.2 秒里只带着上一个主题的增益走，
+       过渡结束后再靠快档闭环把一个大台阶追回来 —— 实测亮度会先探底再回弹
+       （浅→深 0.25 → 0.32），读起来是「沉下去又浮起来」。
+       反过来，若让闭环在过渡中途直接纠正，中间态的亮度并不是任何稳定状态，
+       又会被拽出凹陷。所以两头都不选：过渡开始的那一帧先**私下量一次终点帧**
+       （见 measureTargetGain），把增益的终点定准；过渡期间只按这条终点
+       几何地走过去，闭环不参与。 */
     const target = acesInv(frame.targetLuminance)
     const measured = acesInv(stats.p50)
     // 滞回带：下限是曝光目标、上端是「再亮就开始发灰」的那条线。
@@ -946,9 +984,10 @@ export function createSkyRenderer(
     else if (measured > hi)
       ratio = hi / Math.max(measured, 1e-3)
 
-    /* 落在带子里 = 这一片水的曝光已经收敛。把「曝光 × 增益」记下来给下一次
-       切主题用（见 blendProductFrom）：那是**场景无关**的量，所以记的是它而不是
-       增益本身 —— 夜里和正午的曝光常数差几倍，记增益会记成一个只能当次用的数。 */
+    /* 落在带子里 = 这一片水的曝光已经收敛。把「曝光 × 增益」记下来：
+       `prefers-reduced-motion` 下没有过渡，下一次切主题用它直接预置增益。
+       那是**场景无关**的量，所以记的是它而不是增益本身 ——
+       夜里和正午的曝光常数差几倍，记增益会记成一个只能当次用的数。 */
     if (ratio === 1)
       productMemory.set(frame.dark, gainShown * frame.exposure)
     /* 收敛节奏：先密后疏。
@@ -957,76 +996,18 @@ export function createSkyRenderer(
     const rate = probeCount === 0 ? 1.0 : probeCount < 3 ? 0.7 : probeCount < 6 ? 0.45 : 0.14
     /* 单步限幅（clamp 的两个边界）必须收得够紧：一次读错的探测不该能一步把画面
        推亮一大截，而且还是不可逆的 —— 波动是暂时的，增益是永久的。
-       实测过一次坏读数造成的后果：第一帧水面因为初相同相叠加而掀斜，顶部翻进镜面
+       实测过一次坏读数造成的后果：第一帧水面因为初相同步叠加而掀斜，顶部翻进镜面
        成了暗斑，一次探测就把增益顶到上限并停在那里。宁可让收敛多花一两次探测。 */
     /* 从 **gainShown**（这一帧真正用的值，也就是刚刚量到的那个状态）出发，
        而不是从 gainTarget —— 过渡期间两者不同步，从目标出发等于把同一份
        修正重复算一遍。稳态下两者相等。 */
     gainTarget = clamp(gainShown * clamp(ratio ** rate, 0.60, 1.45), GAIN_MIN, GAIN_MAX)
     probeCount++
+    return stats
   }
 
-  function renderFrame(now: number, dt: number) {
-    if (!frame)
-      return
-
-    waterTime += dt * WATER_TIME_SCALE
-
-    // 指针视差：极端克制，只够让天空「有厚度」
-    pointerSmoothX += (pointerX - pointerSmoothX) * 0.045
-    pointerSmoothY += (pointerY - pointerSmoothY) * 0.045
-    yaw += (targetYaw - yaw) * 0.02
-    pitch += (targetPitch - pitch) * 0.02
-
-    resize()
-
-    /* ---- 主题过渡 ----
-     * 不在过渡里时就是 `frame` 本身。在过渡里用插值帧渲染 ——
-     * 只有**渲染**用它：闭环在这段时间是停的
-     * （拿插值路径上的中间态去纠正，就是跟过渡曲线对着干），
-     * 探针的判据、`dark` 标记仍看 `frame`（目标主题）。 */
-    let f = frame
-    /** 过渡的缓动进度（0..1）；不在过渡里是 1 */
-    let blendEase = 1
-    if (blendFrom) {
-      const k = clamp((now - blendStart) / themeBlendMs, 0, 1)
-      if (k >= 1) {
-        blendFrom = null
-        /* 过渡刚结束：把收敛节奏再当一次「第一眼」，让残差（介质换掉之后
-           真实亮度与过渡终点之间的那点差）用快档收掉，而不是等稳态档慢慢磨。 */
-        probeCount = 0
-        probeDue = 0
-      }
-      else {
-        // smootherstep：两端一阶导为 0，起停不顿
-        blendEase = k * k * k * (k * (k * 6 - 15) + 10)
-        f = mixFrame(blendFrom, frame, blendEase)
-        /* 过渡期间相机也由插值帧驱动。否则那两行缓慢的平滑插值会比过渡本身
-           还慢，把「平滑」拖成「迟钝」。 */
-        yaw = f.cameraAzimuth
-        pitch = f.cameraPitch
-      }
-    }
-    renderedFrame = f
-
-    /* ---- 增益 ----
-     * 过渡期间：由「曝光 × 增益」的乘积反解（见 blendProductFrom），乘积本身
-     * 几何地走完这一段 —— 亮度因此只因为介质在变而变，不会因为两个乘子各按各的
-     * 节奏走而冲高或塌陷。
-     * 不在过渡里：向控制器的目标值指数逼近（见 GAIN_EASE_S）。命令仍是阶跃，
-     * 画面是连续的；`dt === 0`（首帧、renderOnce、标签页刚恢复）时直接到位，
-     * 那种情况下没有「过渡」可言，硬要点亮一个中间值反而多一帧错的画面。 */
-    if (blendFrom) {
-      const product = blendProductFrom > 0 && blendProductTo > 0
-        ? blendProductFrom * (blendProductTo / blendProductFrom) ** blendEase
-        : blendProductFrom
-      gainShown = clamp(product / Math.max(f.exposure, 1e-6), GAIN_MIN, GAIN_MAX)
-      gainTarget = gainShown
-    }
-    else {
-      gainShown += (gainTarget - gainShown) * (dt > 0 ? 1 - Math.exp(-dt / GAIN_EASE_S) : 1)
-    }
-    // uResolution 在 resize() 里设：只有画布尺寸真的变了才需要动它
+  /** 把一帧的全部 uniform 写进去（uTime 用当前水面时钟，uGain 用 gainShown）。 */
+  function applyUniforms(f: SkyFrame) {
     waterUniforms.uTime.value = waterTime
     waterUniforms.uCam.value.set(yaw + pointerSmoothX * 0.030, pitch + pointerSmoothY * 0.018)
     waterUniforms.uExposure.value = f.exposure
@@ -1047,6 +1028,121 @@ export function createSkyRenderer(
     waterUniforms.uPhaseG.value = f.phaseG
     waterUniforms.uScatterTint.value.set(...f.scatterTint)
     waterUniforms.uSkyAbove.value.set(...f.skyAbove)
+  }
+
+  /**
+   * 量一次「终点主题」需要的曝光，写进过渡终点的乘积（blendProductTo）。
+   *
+   * 为什么非量不可：两片水的曝光差接近一个量级，而它没有解析式 ——
+   * 介质、俯仰、窗占比一起变。上一版拿「这个主题上次收敛的乘积」当终点，
+   * 第一次切到某主题时没有记忆，只能让乘积保持不变，于是过渡结束时曝光还差几倍，
+   * 画面在过渡之后还要补一段亮度（先沉到底再浮起来）。
+   *
+   * 做法：在过渡的**第一帧**，趁这一帧还没提交给合成器，先用终点帧的参数
+   * 画一次、回读像素、按 `gain' = gain · acesInv(目标亮度) / acesInv(实measure)` 反解。
+   * 这个式子在场景空间里是精确的（ACES 反函数之后增益是纯乘子）；
+   * 泛光阈值带来的那点非线性由过渡结束后的闭环收尾。
+   *
+   * 代价：每次切主题多一趟渲染 + 一次 readPixels。切主题是低频事件，
+   * 而且渲染分辨率本来就只有屏幕的百分之几十，这个一次性开销换掉的是一段被所有人
+   * 一眼看到的「回弹」。这一趟的耗时也不计入性能统计（见下面重置 startedAt）。
+   */
+  function measureTargetGain() {
+    const target = frame
+    blendMeasurePending = false
+    if (!target)
+      return
+    const want = acesInv(target.targetLuminance)
+    let guess = gainShown
+    /* 迭代两次：从「增益 → 显示亮度」不是纯线性的 —— 泛光阈值和自适应分辨率
+       都会掺一手，一次线性反解会偏。第二次用第一次的结果再量一遍，
+       残差就落在泛光那点非线性里，过渡结束之后不需要再补一段。 */
+    for (let i = 0; i < 2; i++) {
+      applyUniforms(target)
+      waterUniforms.uGain.value = guess
+      composer.render(0)
+      startedAt = performance.now()
+      const measuredStats = probe(true)
+      if (!measuredStats) {
+        blendProductTo = guess * Math.max(target.exposure, 1e-6)
+        return
+      }
+      const measured = acesInv(measuredStats.p50)
+      const next = clamp(guess * (want / Math.max(measured, 1e-3)), GAIN_MIN, GAIN_MAX)
+      const done = Math.abs(next / guess - 1) < 0.02
+      guess = next
+      if (done)
+        break
+    }
+    blendProductTo = guess * Math.max(target.exposure, 1e-6)
+  }
+
+  function renderFrame(now: number, dt: number) {
+    if (!frame)
+      return
+
+    waterTime += dt * WATER_TIME_SCALE
+
+    // 指针视差：极端克制，只够让天空「有厚度」
+    pointerSmoothX += (pointerX - pointerSmoothX) * 0.045
+    pointerSmoothY += (pointerY - pointerSmoothY) * 0.045
+    yaw += (targetYaw - yaw) * 0.02
+    pitch += (targetPitch - pitch) * 0.02
+
+    resize()
+
+    /* ---- 主题过渡 ----
+     * 不在过渡里时就是 `frame` 本身。在过渡里用插值帧渲染。
+     * 闭环在过渡期间停摆（见 probe），终点曝光另由 measureTargetGain 量出。 */
+    let f = frame
+    /** 过渡的缓动进度（0..1）；不在过渡里是 1 */
+    let blendEase = 1
+    if (blendFrom) {
+      const k = clamp((now - blendStart) / themeBlendMs, 0, 1)
+      if (k >= 1) {
+        blendFrom = null
+        /* 过渡刚结束：立刻探一次把泛光非线性带来的小残差收掉。
+           收敛节奏用中档 —— 终点是量出来的，剩下的差只该是一两次小修正；
+           重置成「第一眼」的快档反而会把一点残差放大成可见回弹。 */
+        probeDue = 0
+        probeCount = 2
+      }
+      else {
+        // smootherstep：两端一阶导为 0，起停不顿
+        blendEase = k * k * k * (k * (k * 6 - 15) + 10)
+        f = mixFrame(blendFrom, frame, blendEase)
+        /* 过渡期间相机也由插值帧驱动。否则那两行缓慢的平滑插值会比过渡本身
+           还慢，把「平滑」拖成「迟钝」。 */
+        yaw = f.cameraAzimuth
+        pitch = f.cameraPitch
+      }
+    }
+    renderedFrame = f
+
+    // 本次过渡的终点曝光还没量：趁这一帧还没提交，先私下画一次终点帧
+    if (blendFrom && blendMeasurePending)
+      measureTargetGain()
+
+    /* ---- 增益 ----
+     * 过渡期间：「曝光 × 增益」的乘积几何地走完这一段，再由它反解增益。
+     * 乘积是场景无关的量，它的终点是**量出来的**（见 measureTargetGain），
+     * 所以过渡结束时就落在正确曝光上，不需要事后补一段。
+     * 不在过渡里：向控制器的目标值指数逼近（见 GAIN_EASE_S）。
+     * `dt === 0`（首帧、renderOnce、标签页刚恢复）时直接到位 ——
+     * 那种情况下没有「过渡」可言，硬要点亮一个中间值反而多一帧错的画面。 */
+    if (blendFrom) {
+      const product = blendProductFrom > 0 && blendProductTo > 0
+        ? blendProductFrom * (blendProductTo / blendProductFrom) ** blendEase
+        : blendProductFrom
+      gainShown = clamp(product / Math.max(f.exposure, 1e-6), GAIN_MIN, GAIN_MAX)
+      gainTarget = gainShown
+    }
+    else {
+      gainShown += (gainTarget - gainShown) * (dt > 0 ? 1 - Math.exp(-dt / GAIN_EASE_S) : 1)
+    }
+
+    // uResolution 在 resize() 里设：只有画布尺寸真的变了才需要动它
+    applyUniforms(f)
 
     /* FFT 海面要先算完，主着色器才采得到这一帧的水面。
        它自带 renderer.setRenderTarget(null)，所以不会影响下面 composer 的画布绑定。 */
@@ -1192,8 +1288,8 @@ export function createSkyRenderer(
       }
     }
 
-    // 亮度探针：刚打开时密一点，让曝光几帧内就收敛；之后降频。
-    // 密集段要盖满上面的收敛表（前 6 次），否则第 5、6 次会掉到 2s 一档，收敛尾巴拖到 5s 之后。
+    /* 亮度探针：刚打开时密一点，让曝光几帧内就收敛；之后降频。
+       密集段要盖满上面的收敛表（前 6 次），否则第 5、6 次会掉到 2s 一档，收敛尾巴拖到 5s 之后。 */
     const interval = probeCount < 6 ? 320 : 2000
     if (options.onProbe && now - probeDue > interval) {
       probeDue = now
@@ -1275,15 +1371,10 @@ export function createSkyRenderer(
     const first = !frame
     /* 主题切换 = **换了一片水**：两套主题的深度差一个量级，连曝光常数都差一个量级。
        而 `gain` 是**有状态**的，切换后它仍然是上一个主题收敛出来的值 ——
-       实测的后果很极端：切过去之后整幅几乎全黑（或整幅过曝发白），
-       而闭环要几十秒才追上。
-       原因是闭环的快收敛只挂在**开页头几次探测**上，稳态每 2 秒才动一点 ——
-       让稳态速率去追一个数量级的曝光差，就是几十秒。
-       **开页第一眼被照顾到了，切主题这一眼没有。**
-       所以主题一变就把收敛节奏当「第一眼」重来：立刻探一次（probeDue = 0）、
-       回到快档（probeCount = 0）。另外把增益**解析预置**到新主题的量级上
-       （见下面 exposureRatio）—— 光是重来节奏还剩下约一秒的错曝光窗口，
-       预置把它压到「第一帧就基本对」。 */
+       实测的后果很极端：切过去之后整幅几乎全黑（或整幅过曝发白）。
+       有过渡时，过渡的第一帧会**量一次终点帧的曝光**，整段过渡按量出来的终点
+       几何地走过去（见 measureTargetGain）；没有过渡（reduced-motion）时
+       只能解析预置（见下面 productMemory / 曝光比）。 */
     const prev = frame
     const themeChanged = prev !== null && prev.dark !== next.dark
     frame = next
@@ -1298,16 +1389,6 @@ export function createSkyRenderer(
       pitch = targetPitch
     }
     if (themeChanged && prev) {
-      /* 解析预置：着色器最后一步是 `col *= uExposure * uGain`，两个 uniform 都是
-         **线性乘子**，所以「曝光小了多少倍，增益就该大多少倍」是能直接算的，
-         不必等闭环去追。预置之后**第一帧就落在正确量级附近**（否则第一帧还带着
-         上一个主题的增益，整幅几乎全黑）。
-         剩下的偏差来自介质本身（两片水、两档目标亮度），没有解析式，交给快档闭环
-         在头一两秒内收掉 —— 而 gainShown 的时间常数把这一步也变成连续的。 */
-      const exposureRatio = next.exposure > 1e-6 ? prev.exposure / next.exposure : 1
-      /* 从 gainShown（画面上真正用的值）出发，不是从 gainTarget：过渡期间两者
-         不同步，从目标出发会把已经投入的修正再算一遍。 */
-      gainTarget = clamp(gainShown * exposureRatio, GAIN_MIN, GAIN_MAX)
       probeCount = 0
       probeDue = 0
       /* 参数过渡：把「一次换掉」摊成 THEME_BLEND_MS 一段（见 mixFrame）。
@@ -1316,7 +1397,22 @@ export function createSkyRenderer(
         blendFrom = renderedFrame ?? prev
         blendStart = performance.now()
         blendProductFrom = gainShown * Math.max(blendFrom.exposure, 1e-6)
-        blendProductTo = productMemory.get(next.dark) ?? blendProductFrom
+        // 这个初值只用来占位：本次过渡的第一帧会量出真正的终点（见 measureTargetGain）
+        blendProductTo = blendProductFrom
+        blendMeasurePending = true
+      }
+      else {
+        /* 没有过渡（prefers-reduced-motion）：画面一帧就到终点，没有「等它暗下去」
+           这件事，只能解析预置。优先用这个主题上次收敛的「曝光 × 增益」
+           （场景无关的量）；没有记忆就按曝光比补一半。 */
+        const remembered = productMemory.get(next.dark)
+        gainTarget = clamp(
+          remembered && remembered > 0
+            ? remembered / Math.max(next.exposure, 1e-6)
+            : gainShown * (next.exposure > 1e-6 ? prev.exposure / next.exposure : 1),
+          GAIN_MIN,
+          GAIN_MAX,
+        )
       }
     }
   }
@@ -1421,6 +1517,13 @@ export function createSkyRenderer(
         return
       startedAt = performance.now()
       renderFrame(performance.now(), 0)
+      /* **没有 rAF 时，闭环的修正永远落不到画面上。**
+         这条路径（prefers-reduced-motion）只画一帧：探针在第一帧量完之后
+         把 gainTarget 改了，但没有下一帧去用它 —— 切主题时那一帧就会一直错着，
+         直到窗口尺寸变化之类的偶然事件再触发一次 renderOnce。
+         所以这里检查一下：如果刚量出来的目标与画面上的增益差得多，就再画一帧。 */
+      if (Math.abs(gainTarget / Math.max(gainShown, 1e-6) - 1) > 0.05)
+        renderFrame(performance.now(), 0)
       /* 只画一帧（prefers-reduced-motion）时没有第二帧，这里补上那次翻牌，
          否则 canvas 会一直停在 opacity:0。 */
       ready()
