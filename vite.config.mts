@@ -62,18 +62,18 @@ function themeBoot(): Plugin {
         )
       }
 
-      // 2. index.html 的内联首帧底色必须与之一致（标记 theme-boot-guard:light / :dark）
+      // 2. index.html 的内联首帧底色必须与之一致（--boot-bg-light / --boot-bg-dark）
       const html = fs.readFileSync(r('src/newtab/index.html'), 'utf-8')
-      const marked = new Map(
-        [...html.matchAll(/background-color:\s*(#[0-9a-f]{6});[^\n]*theme-boot-guard:(\w+)/gi)]
-          .map(m => [m[2].toLowerCase(), m[1].toLowerCase()]),
+      const bootBg = new Map(
+        [...html.matchAll(/--boot-bg-(light|dark):\s*(#[0-9a-f]{6})/gi)]
+          .map(m => [m[1].toLowerCase(), m[2].toLowerCase()]),
       )
       const expect: Record<string, string> = { light: bgDeep[0], dark: bgDeep[1] }
       for (const [name, hex] of Object.entries(expect)) {
-        if (marked.get(name) !== hex) {
+        if (bootBg.get(name) !== hex) {
           throw new Error(
             `[theme-boot] 首帧底色与 main.css 的 --bg-deep 不一致（${name}）：`
-            + `src/newtab/index.html 里是 ${marked.get(name) ?? '缺失'}，main.css 里是 ${hex}。`
+            + `src/newtab/index.html 里是 ${bootBg.get(name) ?? '缺失'}，main.css 里是 ${hex}。`
             + `两处必须一致，否则开页会闪一下颜色。`,
           )
         }
@@ -112,8 +112,6 @@ function themeBoot(): Plugin {
         if (!ctx.filename.replace(/\\/g, '/').endsWith('src/newtab/index.html'))
           return html
 
-        // 注意必须连 </script> 一起匹配：index.html 的注释里也写了这个标签的样子，
-        // 只匹配 `src="./theme-boot.js"` 会改到注释上、真正的标签原样留在产物里。
         const tag = '<script src="./theme-boot.js"></script>'
         const occurrences = html.split(tag).length - 1
         if (occurrences !== 1) {

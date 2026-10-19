@@ -1,13 +1,6 @@
 <script setup lang="ts">
 import { useTheme } from '~/composables/useTheme'
 
-/**
- * 侧边栏。
- *
- * 直接复用新标签页那套快捷方式组件（自己带增删改 / 排序 / 撤销），
- * 所以侧边栏天然就是一个「随手管理 + 快速打开」的面板，不需要另写一套。
- */
-
 const { isDark, themeIcon, toggleTheme } = useTheme()
 
 function openOptionsPage() {
@@ -18,8 +11,8 @@ function openOptionsPage() {
 <template>
   <main class="sidepanel">
     <header class="sidepanel__head">
-      <span class="sidepanel__mark" aria-hidden="true">M</span>
-      <span class="sidepanel__title">子午 Meridiem</span>
+      <span class="sidepanel__mark" aria-hidden="true">子</span>
+      <span class="sidepanel__title">子午 Ziwu</span>
 
       <button
         type="button"
@@ -40,7 +33,6 @@ function openOptionsPage() {
       </button>
     </header>
 
-    <!-- 侧边栏里点磁贴开新标签页：同标签页跳转会把侧边栏自己顶掉 -->
     <ShortcutGrid open-in-new-tab />
   </main>
 </template>
@@ -69,8 +61,8 @@ function openOptionsPage() {
   background: var(--brand);
   color: var(--text-on-accent);
   font-family: var(--font-display);
-  font-size: 0.78rem;
-  font-weight: 700;
+  font-size: 0.9rem;
+  font-weight: 600;
 }
 
 .sidepanel__title {

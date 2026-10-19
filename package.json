@@ -1,10 +1,13 @@
 {
-  "name": "meridiem",
-  "displayName": "子午 Meridiem",
+  "name": "ziwu",
+  "displayName": "子午 Ziwu",
+  "shortName": "子午",
   "version": "0.0.1",
   "private": true,
   "packageManager": "pnpm@9.7.1",
-  "description": "子午 Meridiem - 一次干净的停留：时间、搜索、常用站点",
+  "description": "子午 Ziwu - 新标签页：一次干净的停留，时间、搜索、常用站点",
+  "author": "大白兔奶糖",
+  "license": "MIT",
   "scripts": {
     "dev": "npm run clear && cross-env NODE_ENV=development run-p dev:*",
     "dev-firefox": "npm run clear && cross-env NODE_ENV=development EXTENSION=firefox run-p dev:*",

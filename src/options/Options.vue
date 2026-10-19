@@ -7,64 +7,29 @@ import { engineColor, searchEngines } from '~/logic/searchEngines'
 import { greeting, searchEngineKey } from '~/logic/storage'
 import { BACKUP_FORMAT, GREETING_MAX_LENGTH, parseBackupFile } from '~/logic/transfer'
 
-/**
- * 设置页。
- *
- * 复用新标签页的组件而不是另写一套：
- * - `SearchBox` 用来**即时预览**当前选中的搜索引擎（改完立刻试一下，不用回新标签页）
- * - `ShortcutGrid` 就是新标签页那套完整的增删改 / 排序 / 撤销组件，设置页直接复用
- *
- * 所有设置都写 storage，新标签页通过 storage.onChanged 自动同步，
- * 所以这里不需要「保存」按钮。
- */
-
 const { isDark, themeLabel, themeIcon, toggleTheme } = useTheme()
 const { list } = useShortcuts()
 const { exportBackup, applyBackup, readBackupFile } = useTransfer()
 
-/* ---------------------------------------------------------------
-   备份与恢复
-   ---------------------------------------------------------------
-   个人站点是**本机数据**，不进源码：仓库里的清单会被打包进扩展产物、
-   推上远端，而书签（尤其是自家后台、内网地址、带账号参数的链接）属于隐私。
-
-   所以站点只在两条本机路径上流动：导出成文件、从文件导入。
-   文件格式是子午自己的（`logic/transfer.ts`），不兼容其它新标签页的备份结构 ——
-   理由写在那边的文件头：猜别人的结构会静默丢站点，借来的格式也装不下
-   问候语 / 默认引擎 / 主题这些属于子午自己的设置。
-   --------------------------------------------------------------- */
 const importOpen = ref(false)
 const importText = ref('')
 const importFileName = ref('')
-/** 读文件本身失败的提示（解析结果的错误是实时算出来的，不走这个 ref） */
 const importError = ref('')
 const importStatus = ref('')
 const importMode = ref<'merge' | 'replace'>('merge')
 const fileInput = ref<HTMLInputElement | null>(null)
 let statusTimer: number | undefined
 
-/**
- * 实时解析：用户一边贴、一边就能看到「认出来几条站点、哪一段不对」，
- * 不必等按下确认才知道文件不对。
- */
 const parsed = computed(() => {
   const text = importText.value.trim()
 
   return text ? parseBackupFile(text) : null
 })
 
-/** 解析错误直接显示；解析成功时不显示任何红色 */
 const parseError = computed(() => (parsed.value && !parsed.value.ok ? parsed.value.error : ''))
 
-/**
- * 解析成功但**丢了东西**的提示（地址无效、重复、引擎不在目录里…）。
- *
- * 这类信息必须露出来：静默丢站点正是「不猜别人的备份格式」要避免的问题，
- * 自己的格式也不能在这一点上退步。显示上走中性色而非红色 —— 导入仍然可用。
- */
 const parseWarnings = computed(() => (parsed.value?.ok ? parsed.value.warnings : []))
 
-/** 这份备份里都带了什么，让用户在写盘前心里有数 */
 const backupSummary = computed(() => {
   const result = parsed.value
   if (!result?.ok)
@@ -83,13 +48,6 @@ const backupSummary = computed(() => {
 
 const canSubmit = computed(() => parsed.value?.ok === true)
 
-/**
- * 覆盖模式会**删掉**本机上备份里没有的站点，这个后果必须在按下去之前讲清楚。
- *
- * 尤其是「备份里一个站点都没有但带了设置」这种文件：它是合法的（解析不会报错），
- * 但覆盖导入会把用户的磁贴全部清空。这种破坏性操作不能只靠一个单选按钮的
- * 一句话说明来兜底。
- */
 const replaceHint = computed(() => {
   const result = parsed.value
   if (!result?.ok || importMode.value !== 'replace')
@@ -126,7 +84,6 @@ function reportBackupResult(
   if (result.settings > 0)
     parts.push(`另有 ${result.settings} 项设置已恢复`)
 
-  // 解析阶段的丢弃原因一并留在结果里，用户事后回头看这条提示也能知道少了什么
   parts.push(...warnings)
 
   importStatus.value = parts.join('，')
@@ -162,12 +119,10 @@ function closeImport() {
   importOpen.value = false
 }
 
-/** 选文件：读成文本填进粘贴框，之后走同一条解析路径，两种入口不会有两套行为 */
 async function onPickFile(event: Event) {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
 
-  // 同一个文件连选两次不会再触发 change，读完就把选择清掉
   input.value = ''
 
   if (!file)
@@ -211,14 +166,13 @@ onBeforeUnmount(() => {
     <div class="settings-shell">
       <header class="settings-header">
         <h1 class="settings-title">
-          子午 Meridiem 设置
+          子午 Ziwu 设置
         </h1>
         <p class="settings-lede">
           改动会立即生效，已打开的新标签页会自动同步。
         </p>
       </header>
 
-      <!-- ---------------- 外观 ---------------- -->
       <section class="settings-card" aria-labelledby="sec-appearance">
         <h2 id="sec-appearance" class="settings-card__title">
           外观
@@ -242,7 +196,6 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <!-- ---------------- 搜索 ---------------- -->
       <section class="settings-card" aria-labelledby="sec-search">
         <h2 id="sec-search" class="settings-card__title">
           默认搜索引擎
@@ -271,13 +224,10 @@ onBeforeUnmount(() => {
 
         <div class="preview">
           <span class="preview__label">试一下</span>
-          <!-- 预览里开新标签页：同标签页跳转会把设置页自己顶掉（与磁贴同理）。
-               不在预览里铺引擎气泡环：这张卡片上方已经有 7 张引擎卡片，环会溢出版心。 -->
           <SearchBox open-in-new-tab :engine-ring="false" />
         </div>
       </section>
 
-      <!-- ---------------- 问候语 ---------------- -->
       <section class="settings-card" aria-labelledby="sec-greeting">
         <h2 id="sec-greeting" class="settings-card__title">
           问候语
@@ -298,7 +248,6 @@ onBeforeUnmount(() => {
         </p>
       </section>
 
-      <!-- ---------------- 快捷方式 ---------------- -->
       <section class="settings-card settings-card--flush" aria-labelledby="sec-shortcuts">
         <h2 id="sec-shortcuts" class="settings-card__title">
           快捷方式
@@ -308,12 +257,10 @@ onBeforeUnmount(() => {
         </p>
 
         <div class="shortcuts-host">
-          <!-- 设置页里点磁贴开新标签页：同标签页跳转会把设置页自己顶掉 -->
           <ShortcutGrid open-in-new-tab />
         </div>
       </section>
 
-      <!-- ---------------- 备份与恢复 ---------------- -->
       <section class="settings-card" aria-labelledby="sec-backup">
         <h2 id="sec-backup" class="settings-card__title">
           备份与恢复
@@ -360,7 +307,6 @@ onBeforeUnmount(() => {
       </section>
     </div>
 
-    <!-- 导入对话框 -->
     <Teleport to="body">
       <Transition name="dialog">
         <div
@@ -413,12 +359,10 @@ onBeforeUnmount(() => {
               data-test="import-textarea"
             />
 
-            <!-- 认出来的内容：写盘前先让用户确认一眼 -->
             <p v-if="canSubmit" class="backup-summary" data-test="import-summary">
               识别到 {{ backupSummary }}
             </p>
 
-            <!-- 丢掉了什么要讲出来，不能让站点静默消失 -->
             <ul
               v-if="parseWarnings.length"
               class="backup-warnings"
@@ -537,7 +481,6 @@ onBeforeUnmount(() => {
 }
 
 .settings-card--flush {
-  /* 磁贴网格自带内边距，这里不再套一层 */
   padding-bottom: 1.5rem;
 }
 
@@ -582,14 +525,12 @@ onBeforeUnmount(() => {
   color: var(--text-2);
 }
 
-/* 主题切换：外形与交互沿用全局幽灵按钮，这里只保留设置页的一档尺寸 */
 .switch-control {
   gap: 0.45rem;
   padding: 0.45rem 0.9rem;
   font-size: 0.8rem;
 }
 
-/* ---- 引擎选择 ---- */
 .engine-picker {
   margin-top: 0.9rem;
   display: grid;
@@ -651,7 +592,6 @@ onBeforeUnmount(() => {
   color: var(--text-3);
 }
 
-/* ---- 输入 ---- */
 .field {
   display: block;
   margin-top: 0.9rem;
@@ -668,7 +608,6 @@ onBeforeUnmount(() => {
   margin-top: 1rem;
 }
 
-/* ---- 备份与恢复 ---- */
 .backup-bar {
   margin-top: 0.9rem;
   display: flex;
@@ -740,7 +679,6 @@ onBeforeUnmount(() => {
   margin-top: 0.9rem;
 }
 
-/* 文件选择框只作为「选择文件」按钮背后的机制存在，不单独露出来 */
 .backup-file {
   display: none;
 }
@@ -755,7 +693,6 @@ onBeforeUnmount(() => {
   color: var(--text-2);
 }
 
-/* 粘贴区：等宽字体让 JSON 的层级看得出来，纵向可拉但不能横着撑破面板 */
 .backup-textarea {
   margin-top: 0.7rem;
   min-height: 8rem;
@@ -771,7 +708,6 @@ onBeforeUnmount(() => {
   color: var(--text-2);
 }
 
-/* 丢弃提示：中性琥珀色，区别于红色的「整体失败」；导入本身仍然可用 */
 .backup-warnings {
   margin: 0.5rem 0 0;
   padding: 0.5rem 0.7rem 0.5rem 1.5rem;
@@ -833,7 +769,6 @@ onBeforeUnmount(() => {
   color: var(--text-1);
 }
 
-/* 覆盖模式会删站点：这一行是唯一的警告，得压得住，所以用正文色而不是 text-2 */
 .backup-mode__hint {
   margin: 0.5rem 0 0 1.4rem;
   font-size: 0.74rem;
@@ -848,7 +783,6 @@ onBeforeUnmount(() => {
   margin-top: 1.1rem;
 }
 
-/* 备份还没解析成功时「导入」点不动，得看得出来是禁用而不是没反应 */
 .backup-actions .primary-control:disabled {
   opacity: 0.45;
   cursor: not-allowed;

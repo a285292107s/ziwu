@@ -1,12 +1,3 @@
-/**
- * 按住 Alt 时浮出的区块快捷键表。
- *
- * 这里只放**纯数据**：键位、文案、要贴靠的 DOM 选择器、动作 id。
- * 真正的动作处理在 `NewTab.vue` 里（它才拿得到搜索框 / 快捷方式区的组件引用），
- * 视觉气泡在 `KeyHints.vue` 里。两处共用同一份配置，键位不会漂。
- *
- * 键位选型：Chrome 优先，避开 Alt+E/F/D（菜单/地址栏）和 Alt+数字（切标签页）。
- */
 export type KeyHintPlacement = 'above' | 'below' | 'left' | 'right'
 
 export type KeyHintAction =
@@ -19,13 +10,10 @@ export type KeyHintAction =
   | 'add'
 
 export interface KeyHintConfig {
-  /** 小写键名，和 `KeyboardEvent.key.toLowerCase()` 对齐；`/` 原样 */
   key: string
   label: string
-  /** 贴在哪个元素旁边；不存在就跳过（例如空列表时的「整理」） */
   selector: string
   placement: KeyHintPlacement
-  /** 可选的副说明，例如网格的方向键 */
   detail?: string
   action: KeyHintAction
 }

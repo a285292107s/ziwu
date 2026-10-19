@@ -1,22 +1,3 @@
-/**
- * 开发用核对脚本（不属于测试套件）：确认扩展**不再往普通网页里注入任何东西**。
- *
- * 背景：仓库 fork 自 vitesse-webext，脚手架自带一份 content script，会在每个页面
- * 右下角注入一个青绿色圆形按钮（并往 body 上挂一个 id 为扩展名的容器）。
- * 本项目是「新标签页」扩展，不需要注入网页，那份脚手架已连同 manifest 里的
- * content_scripts / web_accessible_resources 一并移除。这个脚本用来在**真实
- * Chromium** 里证明它真的没了，而不是只相信源码 grep。
- *
- * 用法：node --no-experimental-require-module scripts/verify-no-injected-ui.mjs [轮次]
- * 产物：docs/review/<轮次>/plain-page.png、newtab.png + stdout 的 JSON 报告
- *
- * 设计要点：
- * - 目标页面用**本地 HTTP 服务**（127.0.0.1）提供，命中 `<all_urls>`，
- *   所以它正是过去会被注入按钮的那种页面；不依赖外网。
- * - 带**反向对照**：先证明检测函数能抓到「有人真的注入了」（手动挂一个同样的
- *   容器再检测一次），再报告真实页面干净。否则「没找到」可能只是检测写错了。
- */
-/* global chrome */
 import fs from 'node:fs'
 import http from 'node:http'
 import path from 'node:path'
@@ -52,7 +33,6 @@ const report = {
   problems: [],
 }
 
-/** 在页面里跑的检测：任何蛛丝马迹都算命中 */
 function detectFn() {
   const hits = []
   if (document.querySelector('#meridiem'))
@@ -66,9 +46,8 @@ function detectFn() {
     if (u.startsWith('chrome-extension://'))
       hits.push(`${el.tagName.toLowerCase()} -> ${u}`)
   }
-  // 用 textContent 而不是 innerText：被 v-show 隐藏的脚手架面板也算命中
   const text = document.body ? document.body.textContent : ''
-  if (text.includes('子午 Meridiem') || text.includes('This is the'))
+  if (text.includes('子午 Ziwu') || text.includes('This is the'))
     hits.push('scaffolding text in body')
   return {
     hits,
@@ -92,7 +71,6 @@ if (!sw)
   sw = await context.waitForEvent('serviceworker')
 const extensionId = sw.url().split('/')[2]
 
-// 后台脚本报错要从 service worker 里捞（page 的 console 监听看不到 SW）
 try {
   await sw.evaluate(() => {
     globalThis.__errs = []
@@ -104,7 +82,6 @@ catch (e) {
   report.backgroundErrors.push(`sw.evaluate failed: ${e.message}`)
 }
 
-// 扩展实际加载的 manifest（不是读文件，是问浏览器）
 try {
   const m = await sw.evaluate(() => JSON.parse(JSON.stringify(chrome.runtime.getManifest())))
   report.manifest = {
@@ -125,18 +102,16 @@ page.on('console', (m) => {
     report.problems.push(`plain console.error: ${m.text()}`)
 })
 
-// ---- 1. 普通网页：应该干干净净 ----
 await page.goto(plainUrl, { waitUntil: 'load' })
-await page.waitForTimeout(1200) // 留足 content script 注入的时间
+await page.waitForTimeout(1200)
 report.injectedOnPlainPage = await page.evaluate(detectFn)
 await page.screenshot({ path: path.join(outDir, 'plain-page.png') })
 
-// ---- 2. 反向对照：证明检测函数不是「永远返回空」 ----
 await page.evaluate(() => {
   const probe = document.createElement('div')
   probe.id = 'meridiem'
   const inner = document.createElement('span')
-  inner.textContent = '子午 Meridiem'
+  inner.textContent = '子午 Ziwu'
   probe.append(inner)
   document.body.append(probe)
 })
@@ -145,7 +120,6 @@ await page.evaluate(() => document.querySelector('#meridiem')?.remove())
 const afterRemoval = await page.evaluate(detectFn)
 report.negativeControl = { foundHits: withProbe.hits, afterRemovalHits: afterRemoval.hits }
 
-// ---- 3. 切换标签页触发 tabs.onActivated（老代码在这里给已删除的 content script 发消息）----
 const other = await context.newPage()
 await other.goto(plainUrl, { waitUntil: 'load' })
 await page.bringToFront()
@@ -161,7 +135,6 @@ catch (e) {
 }
 await other.close()
 
-// ---- 4. 新标签页仍然正常 ----
 const newtab = await context.newPage({ viewport: { width: 1440, height: 900 } })
 newtab.on('pageerror', e => report.problems.push(`newtab pageerror: ${e.message}`))
 newtab.on('console', (m) => {
@@ -186,7 +159,6 @@ report.newtab = await newtab.evaluate(() => ({
   title: document.title,
   hasSearch: !!document.querySelector('[data-test="search-input"]'),
   tileCount: document.querySelectorAll('[data-test="shortcut-grid"] > *').length,
-  // 新标签页自己也带 id，但那是页面自身的，不是注入容器
   bodyChildren: document.body.childElementCount,
 }))
 await newtab.screenshot({ path: path.join(outDir, 'newtab.png') })

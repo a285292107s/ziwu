@@ -1,29 +1,9 @@
-/**
- * 浅 ⇄ 深主题切换的过渡评审脚本（开发用，不属于测试套件）。
- *
- * 为什么需要它：截图只能拍「稳态」，而主题过渡的全部问题都在**中间那 1.2 秒**里。
- * 这里做两件事：
- *   1. 在页面里逐帧（rAF）把 WebGL 画布缩小画进 2D 画布，量整幅 RGB 均值与分位数，
- *      得到一条**真实像素的亮度时间线** —— 硬切会表现为单帧跳变，平滑过渡是连续曲线；
- *   2. 在切换瞬间按固定间隔截几张图，落到 docs/review/<轮次>/，用肉眼看中段有没有
- *      「文字/玻璃/水面各走各的」。
- *
- * 用法：
- *   node --no-experimental-require-module scripts/theme-transition.mjs <轮次>
- *   node --no-experimental-require-module scripts/theme-transition.mjs r01 --sky=12:00 --from=light
- *   node --no-experimental-require-module scripts/theme-transition.mjs r01 --view=960x600 --shots=1
- *   node --no-experimental-require-module scripts/theme-transition.mjs r01 --to=dark,light   # 来回切
- *
- * 前提：`extension/` 是生产产物（先 node scripts/rebuild.mjs），否则加载到的是 dev stub。
- */
 import fs from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
 import { Buffer } from 'node:buffer'
 import { fileURLToPath } from 'node:url'
 import { chromium } from '@playwright/test'
-
-/* global chrome -- setTheme 的回调注入到页面里执行，chrome 由扩展环境提供 */
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const extensionPath = path.join(__dirname, '..', 'extension')
@@ -83,18 +63,9 @@ async function waitForPainted() {
     null,
     { timeout: 20000 },
   ).catch(() => {})
-  // 让自适应分辨率与曝光先大致稳住，过渡采样才有可比性
   await page.waitForTimeout(settleMs)
 }
 
-/**
- * 在页面里装一个逐帧采样器。
- *
- * 关键点：`drawImage(webglCanvas)` 必须在**同一帧的绘制之后、合成之前**执行，
- * 否则 drawing buffer 已经被清空，量到的是黑。这里把采样器的 rAF 挂在渲染器的
- * rAF 之后注册（渲染器先初始化），同一帧里它先画、我们后读；同时降采样到
- * 160×100，读回成本可以忽略。
- */
 async function installSampler() {
   await page.evaluate(() => {
     const canvas = document.querySelector('canvas[class*="sky__canvas"]')
@@ -149,7 +120,6 @@ async function installSampler() {
         min,
         max,
         gain: DEBUG ? window.__sky?.probe?.gain ?? null : null,
-        // 探针回报的整幅中位数与正文带 p90，用来核对闭环到底在追哪个数
         probeP50: DEBUG ? window.__sky?.probe?.p50 ?? null : null,
         probeTextP90: DEBUG ? window.__sky?.probe?.text?.p90 ?? null : null,
         veil: DEBUG ? window.__sky?.veil ?? null : null,
@@ -174,15 +144,10 @@ for (const to of toList) {
   await page.reload()
   await waitForPainted()
 
-  /* ---- 1. 纯采样 ----
-     这一轮**中途不截图**：Playwright 的 screenshot 会强制布局/合成，rAF 会被打出
-     几百毫秒的洞，时间线上就会出现假的「单帧大跳」。截图放到第二轮单独做。 */
   await installSampler()
-  // 攒一段切换前的基线（基线帧要能看出「切换前是不是稳的」）
   await page.waitForTimeout(350)
   const t0 = Date.now()
   await setTheme(to)
-  // 页面里的 performance.now() 与 Node 的 Date.now() 不是同一原点，切换时刻必须在页面里取
   const changeAt = await page.evaluate(() => performance.now())
   await page.waitForTimeout(Math.max(0, waitMs - (Date.now() - t0)))
   const trace = await readTrace()
@@ -205,12 +170,6 @@ for (const to of toList) {
   report.push({ from: current, to, probe, shotPaths: [] })
   console.log(`  ${current} → ${to}  采样 ${trace.length} 帧`)
 
-  /* ---- 2. 画面 ----
-     截图/录屏会阻塞 rAF，所以另起一次切换：先切回起点、等画面稳住，再切到目标。
-     这一轮的像素时间线不作结论，只看画面。
-       --shots=1     按固定间隔截图（screenshot 本身耗时，时间点会漂）
-       --screencast=1 用 CDP screencast 收**带时间戳的真帧**（推荐：能看清 0~1.2s 里
-                      文字、玻璃和水各自走到了哪一步） */
   if (shots || screencast) {
     const shotPaths = []
     await setTheme(current)
@@ -272,16 +231,11 @@ for (const to of toList) {
 
 await browser.close()
 
-/* 把时间线折算成可读的结论：
-   - 切换前 300ms 的均值当作起点，2 秒后的均值当作终点；
-   - 找出单帧最大跳变（占全程变化的比例）—— 硬切接近 1，平滑过渡很小；
-   - 找出「走完 95% 位移」的时刻 —— 和 THEME_BLEND_MS 对得上才说明节奏受控。 */
 const summary = report.map(({ from, to, probe }) => {
   const file = path.join(outDir, `trace-${from}-to-${to}.json`)
   const { trace, changeAt } = JSON.parse(fs.readFileSync(file, 'utf8'))
   if (!trace.length)
     return { from, to, error: '没有采样到帧' }
-  // t 是页面里的 performance.now()，统一换算成「距切换」的毫秒
   const rel = trace.map(f => ({ ...f, dt: f.t - changeAt }))
   const base = rel.filter(f => f.dt < -0.2)
   const baseMean = base.length ? base.reduce((a, f) => a + f.mean, 0) / base.length : rel[0].mean
@@ -291,7 +245,6 @@ const summary = report.map(({ from, to, probe }) => {
   let maxStep = 0
   let maxStepAt = 0
   for (let i = 1; i < rel.length; i++) {
-    // 采样有洞（掉帧、GC）时，那一「步」不是真实的画面变化，不能计入
     if (rel[i].dt - rel[i - 1].dt > 100)
       continue
     const step = Math.abs(rel[i].mean - rel[i - 1].mean)

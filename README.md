@@ -1,8 +1,10 @@
-# 子午 Meridiem
+# 子午 Ziwu
 
 一个基于 [`vitesse-webext`](https://github.com/antfu/vitesse-webext) 的 Chrome 扩展：**接管浏览器新标签页**，把「打开新标签页」这件事变成一次干净的停留——时间、搜索、常用站点，就这三样。
 
 技术栈：**Vue 3 + TypeScript + Vite + Unocss + MV3**，包管理器为 pnpm。
+
+隐私：不收集、不上传，数据只留在本机（见 [PRIVACY.md](PRIVACY.md)）。
 
 视觉上走「精密计时仪器 + 编辑式留白」：左侧一条对齐的中轴（时钟 → 日期问候 → 搜索 → 磁贴），背景是一片**随真实时间变化的 WebGL 水下天光**，材质是玻璃 + 一层胶片颗粒。字体自托管（时钟 Space Grotesk、正文 Manrope），深浅两个主题各有一套完整的语义令牌，见 [设计与工程约束](#设计与工程约束)。
 
@@ -223,12 +225,14 @@
 {
   "format": "meridiem.backup",
   "version": 1,
-  "app": "子午 Meridiem",
+  "app": "子午 Ziwu",
   "exportedAt": "2026-10-15T08:34:00.000Z",
   "settings": { "greeting": "…", "searchEngineKey": "bing", "themeMode": "dark" },
   "shortcuts": [{ "name": "GitHub", "url": "https://github.com/" }]
 }
 ```
+
+`format` 仍是 `meridiem.backup`：它是文件格式标识，发布前的旧名冻结在这里，不随品牌名改动（见 [ADR-0007](docs/adr/0007-品牌名定为子午-Ziwu.md)）。
 
 **为什么不做成「也能读 iTab 备份」的兼容格式**，这件事是想清楚了的，三个理由都是实测出来的：
 
@@ -289,6 +293,8 @@ pnpm dev         # 开发模式：监听改动并打包到 extension/
 | `pnpm typecheck` | TypeScript 类型检查 |
 | `pnpm lint` | ESLint（可自动修复） |
 
+> Windows 上若 `build:web` 报 esbuild 临时文件 `Access is denied`，见 [LESSONS.md](docs/LESSONS.md) 的「构建与验证工具」。
+
 `scripts/` 下的脚本都是**开发用的验证工具，不是测试套件**（见 [AGENTS.md](./AGENTS.md)）。产物落在 `docs/review/<轮次>/`：
 
 ```bash
@@ -333,7 +339,7 @@ node scripts/doc-images.mjs                                            # 生成�
 ```text
 mytab/
 ├── src/
-│   ├── newtab/             # 新标签页（子午 Meridiem 的核心）
+│   ├── newtab/             # 新标签页（子午 Ziwu 的核心）
 │   ├── popup/              # 工具栏弹窗
 │   ├── options/            # 设置页
 │   ├── sidepanel/          # 侧边栏
@@ -511,7 +517,7 @@ safelist: [...searchEngines.map(e => e.icon), 'i-carbon-sun', 'i-carbon-moon']
 
 `shortcuts` 用了 `{ mergeDefaults: false }`：这样用户主动清空列表后不会被默认值"复活"。
 
-storage 键名统一用 `meridiem-` 前缀（产品名 子午 Meridiem）。改名前的 `mytab-*` 由 `useWebExtensionStorage` 的**读路径懒搬迁**一次：读到旧键 → 写新键 → 删旧键。不放在启动流程里，是因为 `writeDefaults` 默认开启 —— 键不存在时 `read()` 会先写一遍默认值，异步迁移会晚一步，把老数据顶掉。`scripts/*.mjs` 里的截图与对比度脚本直接按这些键读写 storage，改键名要和它们一起改。
+storage 键名统一用 `meridiem-` 前缀。这是发布前旧名留下的**冻结技术标识**，不是品牌名：品牌已定为子午 Ziwu，键名与品牌解耦，不再随改名迁移（见 [ADR-0007](docs/adr/0007-品牌名定为子午-Ziwu.md)）。更早的 `mytab-*` 由 `useWebExtensionStorage` 的**读路径懒搬迁**一次：读到旧键 → 写新键 → 删旧键。不放在启动流程里，是因为 `writeDefaults` 默认开启 —— 键不存在时 `read()` 会先写一遍默认值，异步迁移会晚一步，把老数据顶掉。`scripts/*.mjs` 里的截图与对比度脚本直接按这些键读写 storage，改键名要和它们一起改。
 
 ### 无障碍
 
@@ -524,7 +530,7 @@ storage 键名统一用 `meridiem-` 前缀（产品名 子午 Meridiem）。改�
 ### manifest 由 TypeScript 生成
 
 `src/manifest.ts` 导出 `getManifest()`，`scripts/manifest.ts` 调用它写出 `extension/manifest.json`。
-可以按环境动态增删权限。子午 Meridiem 的核心字段是：
+可以按环境动态增删权限。子午 Ziwu 的核心字段是：
 
 ```ts
 const manifest = {
@@ -539,7 +545,7 @@ const manifest = {
 `src/manifest.ts` 中当前申请了 `tabs`、`storage`、`activeTab`、`sidePanel`、`favicon`，以及 `host_permissions: ['*://*/*']`。
 
 - `favicon` 是磁贴取真实站点图标（MV3 的 `/_favicon/` 接口）所需的权限，**不要删**。`_favicon` 只在扩展页面里调用，所以不需要为它声明 `web_accessible_resources`（那是给 content script 用的）。
-- 子午 Meridiem **不注入任何网页脚本**（脚手架时代那份 content script 及其右下角按钮已移除，`scripts/verify-no-injected-ui.mjs` 会在真实 Chromium 里证明这一点），因此 `host_permissions` 与 `tabs` / `activeTab` 目前没有代码依赖。要收窄权限，请先在真实浏览器里加载 `extension/` 确认磁贴图标仍然正常——`_favicon` 对**用户没访问过**的站点是否依赖 host 权限去实时取图标，靠读文档无法下结论，必须实测：
+- 子午 Ziwu **不注入任何网页脚本**（脚手架时代那份 content script 及其右下角按钮已移除，`scripts/verify-no-injected-ui.mjs` 会在真实 Chromium 里证明这一点），因此 `host_permissions` 与 `tabs` / `activeTab` 目前没有代码依赖。要收窄权限，请先在真实浏览器里加载 `extension/` 确认磁贴图标仍然正常——`_favicon` 对**用户没访问过**的站点是否依赖 host 权限去实时取图标，靠读文档无法下结论，必须实测：
 
 ```ts
 // 收窄后大致长这样（改完务必真机确认磁贴图标与侧边栏都还在）

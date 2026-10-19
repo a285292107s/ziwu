@@ -1,21 +1,3 @@
-/**
- * 开发用核对脚本（不属于测试套件）：确认「点击磁贴图标能不能跳转」。
- *
- * 用法：node --no-experimental-require-module scripts/verify-tile-click.mjs
- *
- * 做法：起一个本地 http 服务当跳转目标（`/a` `/b` `/c` 各不相同），
- * 把扩展加载进 Chromium，用**真实鼠标事件**分别跑：
- *   1. 普通点击          → 应当同标签页打开 /a
- *   2. 按住 320ms 再松手 → 应当同标签页打开 /a（这是被指针捕获吃掉、需要补偿的那一次）
- *   3. 按住 900ms 再松手 → 不该跳转（「拿起来又放下」）
- *   4. 按住 300ms 后拖到第 2 格 → 不该跳转，且顺序真的落盘了
- *   5. Ctrl+点击         → 应当新标签页打开 /a
- *   6. 键盘 Enter        → 应当同标签页打开 /a
- *
- * 顺带把每次 click 事件的 target 记下来（捕获阶段 + console），
- * 出问题时一眼能看出点击到底落在哪个元素上 —— 这正是之前那个 bug 的形状。
- */
-/* global chrome */
 import http from 'node:http'
 import path from 'node:path'
 import process from 'node:process'
@@ -49,12 +31,6 @@ if (!sw)
 const extensionId = sw.url().split('/')[2]
 const newtabUrl = `chrome-extension://${extensionId}/dist/newtab/index.html`
 
-/**
- * 直接在后台里写 storage。
- *
- * 新标签页已经**不再**做「并入预置站点」的合并动作，所以这里只要把
- * `meridiem-shortcuts` 写好即可：键存在时首屏不会再用种子覆盖它。
- */
 async function seed(shortcuts) {
   await sw.evaluate(async (value) => {
     await chrome.storage.local.set({
@@ -78,7 +54,6 @@ page.on('console', (m) => {
 })
 page.on('pageerror', e => logs.push(`pageerror: ${e.message}`))
 
-// 捕获阶段记下每一次 click 的落点
 await page.addInitScript(() => {
   document.addEventListener('click', (e) => {
     const t = e.target
@@ -91,7 +66,6 @@ const results = []
 
 async function point(selector) {
   const el = page.locator(selector)
-  // 设置页的磁贴可能落在首屏之外：不先滚进来，坐标会落到视口外
   await el.scrollIntoViewIfNeeded()
   await page.waitForTimeout(150)
   const box = await el.boundingBox()
@@ -127,7 +101,6 @@ async function waitForTab(needle, timeout = 3000) {
 
 await seed(ALL)
 
-/* 普通点击 */
 const tiles = await reset()
 logs.length = 0
 let at = await point('[data-test="shortcut-tile-a"] .tile-face')
@@ -135,7 +108,6 @@ await page.mouse.click(at.x, at.y)
 await page.waitForTimeout(1200)
 results.push({ case: '普通点击', tiles, url: page.url(), ok: tiles === 3 && page.url().includes('/a'), logs: [...logs] })
 
-/* 按住 320ms 再松手（不挪窝）：慢点击仍要打开站点 */
 await reset()
 logs.length = 0
 at = await point('[data-test="shortcut-tile-a"] .tile-face')
@@ -146,7 +118,6 @@ await page.mouse.up()
 await page.waitForTimeout(1200)
 results.push({ case: '按住 320ms 松手', url: page.url(), ok: page.url().includes('/a'), logs: [...logs] })
 
-/* 按住 900ms 再松手：按得够久又没挪窝，不算点击 */
 await reset()
 logs.length = 0
 at = await point('[data-test="shortcut-tile-a"] .tile-face')
@@ -157,7 +128,6 @@ await page.mouse.up()
 await page.waitForTimeout(1200)
 results.push({ case: '按住 900ms 松手', url: page.url(), ok: !page.url().includes('127.0.0.1'), logs: [...logs] })
 
-/* 拖动排序：按住 300ms 后拖到第 2 格 */
 const tiles4 = await reset()
 logs.length = 0
 at = await point('[data-test="shortcut-tile-a"] .tile-face')
@@ -178,7 +148,6 @@ results.push({
   logs: [...logs],
 })
 
-/* Ctrl+点击（不按住）：原生新标签页 */
 await seed(ALL)
 await reset()
 logs.length = 0
@@ -190,7 +159,6 @@ await page.keyboard.up('Control')
 const ctrlOpened = await waitForTab('/a')
 results.push({ case: 'Ctrl+点击', tabs: openTabs().filter(u => u.includes('127.0.0.1')), ok: ctrlOpened, logs: [...logs] })
 
-/* 中键点击（不按住）：原生新标签页 */
 await seed(ALL)
 await reset()
 logs.length = 0
@@ -199,7 +167,6 @@ await page.mouse.click(at.x, at.y, { button: 'middle' })
 const middleOpened = await waitForTab('/a', 2000)
 results.push({ case: '中键点击', tabs: openTabs().filter(u => u.includes('127.0.0.1')), ok: middleOpened, logs: [...logs] })
 
-/* 键盘 Enter */
 for (const p of browser.pages()) {
   if (p !== page)
     await p.close()
@@ -211,7 +178,6 @@ await page.keyboard.press('Enter')
 await page.waitForTimeout(1000)
 results.push({ case: '键盘 Enter', url: page.url(), ok: page.url().includes('/a'), logs: [...logs] })
 
-/* 触屏轻点（手指路径） */
 await reset()
 logs.length = 0
 at = await point('[data-test="shortcut-tile-a"] .tile-face')
@@ -219,7 +185,6 @@ await page.touchscreen.tap(at.x, at.y)
 await page.waitForTimeout(1200)
 results.push({ case: '触屏轻点', url: page.url(), ok: page.url().includes('/a'), logs: [...logs] })
 
-/* 触屏按住拖拽：手指路径也要能排序，且不跳转 */
 await seed(ALL)
 const tiles8 = await reset()
 logs.length = 0
@@ -241,7 +206,6 @@ results.push({
   logs: [...logs],
 })
 
-/* 设置页里的磁贴（ShortcutGrid 传了 openInNewTab，应当开新标签页） */
 for (const p of browser.pages()) {
   if (p !== page)
     await p.close()

@@ -1,15 +1,3 @@
-/**
- * 生成 README 用的文档配图（开发用，不属于测试套件）。
- *
- * 为什么单独有这个脚本：README 里的截图必须来自 **生产构建 + 真实扩展上下文**，
- * 否则很容易出现「文档配图还是脚手架时代的旧界面」——本仓库就踩过这个坑
- * （docs/newtab-preview.png 一度是开发模式的旧新标签页，连快捷方式都没有）。
- * 每次界面有可见改动，跑一遍这个脚本刷新配图即可。
- *
- * 用法：node --no-experimental-require-module scripts/doc-images.mjs
- * 前置：先 `node scripts/rebuild.mjs`（脚本会校验 extension/ 是生产构建）
- */
-/* global chrome -- 注入到页面上下文里执行，本身不是 Node 全局 */
 import fs from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
@@ -22,8 +10,6 @@ const extensionPath = path.join(root, 'extension')
 const outDir = path.join(root, 'docs')
 fs.mkdirSync(outDir, { recursive: true })
 
-// 生产构建校验：开发构建的 manifest 里 CSP 会带 localhost，
-// 用它当截图源会得到一份「看起来正常但其实和线上不一样」的配图。
 const manifest = JSON.parse(fs.readFileSync(path.join(extensionPath, 'manifest.json'), 'utf8'))
 const csp = JSON.stringify(manifest.content_security_policy ?? '')
 if (csp.includes('localhost'))
@@ -67,15 +53,12 @@ async function set(key, value) {
     throw new Error(`写入 ${key} 失败：期望 ${JSON.stringify(value)}，实际 ${JSON.stringify(readBack)}`)
 }
 
-/** 打开新标签页并等待入场动画结束（截到的必须是终态） */
 async function openNewTab({ theme }) {
   await page.setViewportSize(VIEWPORT)
-  // 必须先落到扩展页面上，`chrome.*` 才存在（about:blank 上 evaluate 会拿到 undefined）
   await page.goto(newTabUrl)
   await page.waitForSelector('[data-test="search-input"]')
   if (theme) {
     await set('meridiem-theme', theme)
-    // 首次运行会写回默认站点；这里显式清掉，保证配图用默认那四个快捷方式
     await page.evaluate(() => chrome.storage.local.remove('meridiem-shortcuts'))
     await page.reload()
   }
@@ -92,17 +75,11 @@ async function shot(file, options = {}) {
   console.log(`  saved docs/${file}`)
 }
 
-/**
- * 搜索框特写：以胶囊的盒子为基准向外留白，
- * 把浮在胶囊外的引擎气泡环一起圈进来；下拉展开时再把菜单的高度算进去。
- */
 async function shotSearchBox(file, { withDropdown }) {
   const shell = await page.locator('.search-shell').boundingBox()
   if (!shell)
     throw new Error('找不到 .search-shell，配图裁剪基准失效')
 
-  // 气泡环伸到胶囊左/上/下侧，只按胶囊盒子裁会把环切掉一半。
-  // 只把可见气泡算进裁剪范围；收起态其余气泡仍在 DOM 里、但不可见，不能算进来。
   const bubbles = await page.locator('.engine-bubble').evaluateAll(els =>
     els
       .filter(el => Number(getComputedStyle(el).opacity) > 0.01)
@@ -117,7 +94,6 @@ async function shotSearchBox(file, { withDropdown }) {
 
   const padX = 34
   const padTop = 30
-  // 下留白刻意留小：留 34px 会把下面「整理」按钮的顶边切进画面（实测右下角出现一条杂边）
   let bottom = Math.max(shell.y + shell.height, ...bubbles.map(b => b.bottom)) + 16
   if (withDropdown) {
     const menu = await page.locator('[role="listbox"]').boundingBox()
@@ -143,37 +119,30 @@ async function shotSearchBox(file, { withDropdown }) {
 }
 
 try {
-  /* ---- 浅色：新标签页全貌 ---- */
   await openNewTab({ theme: 'light' })
   await shot('newtab-preview.png')
 
-  /* ---- 浅色：按住 Alt 的区块快捷键提示 ---- */
   await page.keyboard.down('Alt')
   await page.waitForTimeout(240)
   await shot('keyboard-hints.png')
   await page.keyboard.up('Alt')
   await page.waitForTimeout(240)
-  // Alt 按键会把搜索框标成「在用」；重新载入，让后面的特写保持静默焦点
   await page.reload()
   await page.waitForSelector('[data-test="search-input"]')
   await page.waitForSelector('[data-test="shortcut-grid"]')
   await page.waitForTimeout(900)
 
-  /* ---- 浅色：搜索框收起态 + 按 Tab 展开后的引擎环 ---- */
   await shotSearchBox('search-box.png', { withDropdown: false })
   await page.keyboard.press('Tab')
   await page.waitForTimeout(340)
   await shotSearchBox('search-ring.png', { withDropdown: false })
 
-  /* ---- 浅色：引擎下拉（打开时会收起环） ---- */
   await page.locator('[data-test="engine-trigger"]').click()
   await page.waitForSelector('[role="listbox"]')
-  // 打开下拉会触发引擎环的退场；等散开动画彻底结束再裁下拉图，避免把残影圈进裁剪范围
   await page.waitForTimeout(700)
   await shotSearchBox('search-dropdown.png', { withDropdown: true })
   await page.keyboard.press('Escape')
 
-  /* ---- 深色：新标签页全貌 ---- */
   await openNewTab({ theme: 'dark' })
   await shot('newtab-dark.png')
 }

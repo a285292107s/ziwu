@@ -1,10 +1,3 @@
-/**
- * 按住 Alt 时浮出的区块快捷键提示。
- *
- * 用 Teleport 挂到 body：提示本身不参与页面布局，也不该被任何父级的
- * `overflow: hidden` / `z-index` 裁掉。位置按 targets 的实时 rect 计算，
- * 打开 / 窗口尺寸变化 / 滚动时重算。
- */
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { keyHints } from '~/logic/keyHints'
@@ -22,12 +15,6 @@ interface PositionedHint {
 const hints = ref<PositionedHint[]>([])
 let measureFrame = 0
 
-/**
- * 只给当前视口里看得见的区块提示。
- *
- * 磁贴多到换行时，末尾的「新增」格会被挤出屏幕；这时按 Alt 仍弹出它的键帽，
- * 用户看不见目标，提示就成了无根的东西。目标至少一半可见才算数。
- */
 function isVisibleInViewport(target: HTMLElement, rect: DOMRect) {
   if (rect.width < 2 || rect.height < 2)
     return false
@@ -78,8 +65,6 @@ function measure() {
         break
     }
 
-    // 贴边时把气泡往回收一点。宽度不固定，按最宽的一枚留出余量；
-    // left / above 的 transform 会改变实际占位，所以这两类单独处理。
     const reserve = 180
     if (config.placement === 'left')
       x = Math.max(x, reserve)

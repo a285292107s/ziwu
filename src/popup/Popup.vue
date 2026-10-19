@@ -1,13 +1,6 @@
 <script setup lang="ts">
 import { useTheme } from '~/composables/useTheme'
 
-/**
- * 工具栏弹窗。
- *
- * 弹窗空间很小，只放「最常做的两件事」：打开设置、切换主题。
- * 不做成第二个设置页，避免和新标签页/设置页三处维护同一套 UI。
- */
-
 const { isDark, themeIcon, toggleTheme } = useTheme()
 
 function openOptionsPage() {
@@ -18,10 +11,10 @@ function openOptionsPage() {
 <template>
   <main class="popup">
     <div class="popup__head">
-      <span class="popup__mark" aria-hidden="true">M</span>
+      <span class="popup__mark" aria-hidden="true">子</span>
       <div>
         <div class="popup__title">
-          子午 Meridiem
+          子午 Ziwu
         </div>
         <div class="popup__sub">
           新标签页
@@ -78,8 +71,8 @@ function openOptionsPage() {
   background: var(--brand);
   color: var(--text-on-accent);
   font-family: var(--font-display);
-  font-size: 0.85rem;
-  font-weight: 700;
+  font-size: 0.95rem;
+  font-weight: 600;
 }
 
 .popup__title {
@@ -99,8 +92,6 @@ function openOptionsPage() {
   gap: 0.5rem;
 }
 
-/* 弹窗只有 250px 宽，两个按钮并排：配色与交互沿用全局控件，
-   这里只把尺寸压到弹窗需要的一档，否则「打开设置」会被挤成两行。 */
 .popup__button {
   flex: 1;
   padding: 0.5rem 0.6rem;

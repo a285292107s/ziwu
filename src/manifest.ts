@@ -5,23 +5,27 @@ import { isDev, isFirefox, port, r } from '../scripts/utils'
 
 export async function getManifest() {
   const pkg = await fs.readJSON(r('package.json')) as typeof PkgType
+  const homepage = (pkg as typeof PkgType & { homepage?: string }).homepage
 
-  // update this file to update this manifest.json
-  // can also be conditional based on your need
   const manifest: Manifest.WebExtensionManifest = {
     manifest_version: 3,
     name: pkg.displayName || pkg.name,
+    short_name: pkg.shortName,
     version: pkg.version,
     description: pkg.description,
+    ...(homepage ? { homepage_url: homepage } : {}),
     action: {
-      default_icon: 'assets/icon-512.png',
+      default_icon: {
+        16: 'assets/icon-16.png',
+        48: 'assets/icon-48.png',
+        128: 'assets/icon-128.png',
+      },
       default_popup: 'dist/popup/index.html',
     },
     options_ui: {
       page: 'dist/options/index.html',
       open_in_tab: true,
     },
-    // 子午 Meridiem 的核心：接管浏览器新标签页
     chrome_url_overrides: {
       newtab: 'dist/newtab/index.html',
     },
@@ -34,35 +38,32 @@ export async function getManifest() {
           service_worker: 'dist/background/index.mjs',
         },
     icons: {
-      16: 'assets/icon-512.png',
-      48: 'assets/icon-512.png',
-      128: 'assets/icon-512.png',
+      16: 'assets/icon-16.png',
+      48: 'assets/icon-48.png',
+      128: 'assets/icon-128.png',
     },
     permissions: [
       'tabs',
       'storage',
       'activeTab',
       'sidePanel',
-      // 取快捷方式磁贴的真实站点图标（MV3 的 /_favicon/ 接口）
       'favicon',
     ],
     host_permissions: ['*://*/*'],
     content_security_policy: {
       extension_pages: isDev
-        // this is required on dev for Vite script to load
         ? `script-src \'self\' http://localhost:${port}; object-src \'self\'`
         : 'script-src \'self\'; object-src \'self\'',
     },
   }
 
-  // add sidepanel
   if (isFirefox) {
+    manifest.author = pkg.author
     manifest.sidebar_action = {
       default_panel: 'dist/sidepanel/index.html',
     }
   }
   else {
-    // the sidebar_action does not work for chromium based
     (manifest as any).side_panel = {
       default_path: 'dist/sidepanel/index.html',
     }

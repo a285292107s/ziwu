@@ -1,10 +1,3 @@
-/**
- * 状态截图（开发用，不属于测试套件）：把新标签页的各种交互状态截下来自检。
- *
- * 用法：node --no-experimental-require-module scripts/states.mjs <轮次目录名>
- * 产物：docs/review/<轮次>/<主题>-<状态>.png
- */
-/* global chrome */
 import fs from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
@@ -70,7 +63,6 @@ await set('meridiem-shortcuts', JSON.stringify(SHORTCUTS))
 for (const theme of ['light', 'dark']) {
   await set('meridiem-theme', theme)
 
-  // 默认态 + 悬停态
   await page.reload()
   await page.waitForSelector('[data-test="shortcut-grid"]')
   await settle()
@@ -79,7 +71,6 @@ for (const theme of ['light', 'dark']) {
   await page.waitForTimeout(600)
   await shot(`${theme}-hover-tile`)
 
-  // 引擎下拉
   await page.locator('[data-test="engine-trigger"]').click()
   await page.waitForSelector('[role="option"]')
   await page.waitForTimeout(400)
@@ -88,14 +79,12 @@ for (const theme of ['light', 'dark']) {
   await page.locator('.masthead').click({ position: { x: 5, y: 5 } })
   await page.waitForTimeout(300)
 
-  // 整理模式
   await page.locator('[data-test="toggle-edit"]').click()
   await page.waitForTimeout(600)
   await shot(`${theme}-editing`)
   await page.locator('[data-test="toggle-edit"]').click()
   await page.waitForTimeout(400)
 
-  // 新增对话框 + 错误态
   await page.locator('[data-test="add-shortcut"]').click()
   await page.waitForSelector('[data-test="shortcut-dialog"]')
   await page.waitForTimeout(500)
@@ -107,7 +96,6 @@ for (const theme of ['light', 'dark']) {
   await page.locator('[data-test="dialog-cancel"]').click()
   await page.waitForTimeout(400)
 
-  // 删除后的撤销 toast
   await page.locator('[data-test="toggle-edit"]').click()
   await page.waitForTimeout(300)
   await page.locator('[data-test^="tile-delete-"]').first().click()
@@ -118,7 +106,6 @@ for (const theme of ['light', 'dark']) {
   await page.locator('[data-test="toggle-edit"]').click()
   await page.waitForTimeout(300)
 
-  // 空状态
   await set('meridiem-shortcuts', '[]')
   await page.reload()
   await page.waitForSelector('[data-test="shortcuts-empty"]')

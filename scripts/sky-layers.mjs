@@ -1,16 +1,3 @@
-/**
- * 天光背景的分层拆解（开发用，不属于测试套件）。
- *
- * 视觉出问题时，最怕的是「看着不对但不知道是哪一层不对」。这个脚本把背景拆开拍：
- *   -final  用户真正看到的样子
- *   -raw    关掉可读性薄膜之后的纯天空（判断问题出在着色器还是薄膜）
- *   -nogl   关掉 WebGL 之后的 CSS 兜底（判断降级路径本身好不好看）
- *
- * 用法：
- *   node --no-experimental-require-module scripts/sky-layers.mjs <轮次> <时刻> [light|dark]
- *   node --no-experimental-require-module scripts/sky-layers.mjs sky01 2026-06-21T12:00 dark
- */
-/* global chrome -- 注入到页面上下文里执行，本身不是 Node 全局 */
 import fs from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
@@ -29,9 +16,6 @@ fs.mkdirSync(outDir, { recursive: true })
 
 const browser = await chromium.launchPersistentContext('', {
   headless: true,
-  // 注意：viewport / deviceScaleFactor 必须给 launchPersistentContext。
-  // 持久化上下文里 newPage() 会忽略这两个参数（拿到的是 1280x720 @1x），
-  // 于是所有按 1440x900@2x 算的采样矩形全部错位。
   viewport: { width: 1440, height: 900 },
   deviceScaleFactor: 2,
   args: [
@@ -64,7 +48,6 @@ await page.waitForTimeout(3000)
 const stamp = `${theme}-${when.replace(/[:T]/g, '')}`
 const reader = await openPixelReader(browser)
 
-/** 天空在不同高度分别是什么颜色 */
 const BANDS = {
   'top(y4-10%)': { x: 100, y: 36, w: 1240, h: 54 },
   'clock(y12-24%)': { x: 100, y: 108, w: 1240, h: 108 },
@@ -99,13 +82,11 @@ const measured = {
   nogl: null,
 }
 
-// 关掉薄膜：留下纯天空
 const veilTag = await page.addStyleTag({ content: '.sky__veil{opacity:0 !important}' })
 await page.waitForTimeout(250)
 measured.raw = await measure('raw')
 await page.evaluate(el => el.remove(), veilTag)
 
-// 关掉 WebGL：留下 CSS 兜底
 await page.evaluate(() => {
   const c = document.querySelector('canvas[class*="sky__canvas"]')
   if (c)

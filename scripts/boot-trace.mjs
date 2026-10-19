@@ -1,43 +1,3 @@
-/**
- * 新标签页「首帧白闪」追踪（开发用的验证工具，不属于测试套件）。
- *
- * 目的：把「打开新标签页白屏闪一下」从肉眼感觉变成可复现的数字，
- * 这样「优化有没有生效」才有依据。做法是两条证据链对齐在同一个时间轴上：
- *
- *   1. CDP `Page.startScreencast` 逐帧抓像素（必须在导航**之前**就开，
- *      否则白屏那几帧根本没被录下来），每帧记 `metadata.timestamp`（Unix epoch 秒），
- *      解码后量整帧平均亮度 / 中心 1/3 平均 RGB / 左上角平均 RGB。
- *   2. `context.addInitScript` 早期探针，在任何页面脚本之前跑，记
- *      timeOrigin、first-paint/FCP、navigation 各段、`<html>` 首次拿到 dark 类的时刻、
- *      `#app` 首次有子节点的时刻、`canvas.is-painted` 首次出现的时刻，
- *      以及 `--bg-base/--bg-deep` 与 body 背景色的变化序列（这直接暴露
- *      「浅色 token 先画一帧」）。
- *
- * 时间轴的零点选 **document 的 `performance.timeOrigin`**（epoch 毫秒，页内精确可得）：
- *   - rel < 0  = 本页文档开始之前，浏览器自己的空白（不受扩展控制，只如实汇报）
- *   - rel >= 0 = 本页自己的时间轴（要归零的就是这段里的亮底帧）
- * 同时把 CDP `Page.lifecycleEvent` 的 commit/init/DOMContentLoaded/load/firstPaint 一起记进
- * JSON 作为交叉验证（实测扩展文档的 `commit` 事件不一定上报，见 JSON 里的 boundary 说明）。
- *
- * 用法：
- *   node --no-experimental-require-module scripts/boot-trace.mjs baseline
- *   node --no-experimental-require-module scripts/boot-trace.mjs after --repeats=3 --settle=3000
- * 可选参数：
- *   --repeats=N          每个场景重复次数（默认 3，报告里取中位数并给抖动范围）
- *   --settle=MS          导航后再录多久（默认 3000；要覆盖天空 canvas 的 .9s 淡入）
- *   --scenarios=a,b      只跑指定场景 id
- *   --modes=goto,tabs    只跑指定打开方式
- *   --no-frames          不落盘关键帧 PNG（省磁盘）
- *
- * 产物：
- *   docs/review/boot/<label>.json               全部原始数据 + 派生指标 + 聚合
- *   docs/review/boot/<label>/frames/<runId>/*.png  关键帧（肉眼复核用）
- *   docs/review/boot/<label>/frames/<runId>/final.png 终态整屏
- *
- * 注意：这个脚本要求 `extension/` 是**生产产物**；跑过 `pnpm dev` 之后
- * extension/dist 会变成指向 localhost 的 stub，追踪结果无意义（会报 requestfailed）。
- */
-/* global chrome -- sw.evaluate 的回调在扩展 service worker 里执行，chrome 是那边的全局 */
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -52,8 +12,6 @@ const ROOT = path.join(__dirname, '..')
 const EXTENSION = path.join(ROOT, 'extension')
 const NEWTAB_INDEX = path.join(EXTENSION, 'dist', 'newtab', 'index.html')
 const OUT_ROOT = path.join(ROOT, 'docs', 'review', 'boot')
-
-// ---------------------------------------------------------------- 参数
 
 const argv = process.argv.slice(2)
 const label = argv.find(a => !a.startsWith('--')) ?? 'baseline'
@@ -71,14 +29,6 @@ const ONLY_MODES = flag('modes', '').split(',').filter(Boolean)
 
 const VIEWPORT = { width: 1280, height: 800 }
 
-/**
- * 阈值都在这里，一并写进 JSON，避免「阈值是多少」事后说不清。
- * - brightLum: 整帧平均（WCAG 相对亮度）高于这个就记一帧「亮底」。
- *   实测分离度很好：纯白 ≈ 1.00，浅色 token(#e8edf2) ≈ 0.83，深色 token ≈ 0.01~0.05。
- * - whiteLum: 纯白级别（about:blank 那种），单独标出来。
- * - centerEps: 判定「已经和终态一样」的通道容差（0-255）。
- * - majorDelta: 相邻保留帧之间任意通道差超过这个值算一次「肉眼可见的变化」。
- */
 const THRESHOLDS = {
   brightLum: 0.35,
   whiteLum: 0.95,
@@ -87,13 +37,6 @@ const THRESHOLDS = {
   downsampleWidth: 240,
 }
 
-/**
- * 首帧主题的同步真源：`src/logic/themeBoot.ts` 里的 THEME_MIRROR_KEY。
- * `useTheme()` 写它、`src/newtab/theme-boot.js` 在首帧之前读它。
- * 所有现成的截图脚本（preview.mjs / shots.mjs / 本脚本）都只写 `chrome.storage.local`，
- * 而 storage 是异步的 —— 镜像缺失时首帧脚本只能按 `prefers-color-scheme` 兜底。
- * 所以测「稳态」必须把镜像也种上，否则测的是「装完第一次打开」那条路径。
- */
 const THEME_MIRROR_KEY = 'meridiem-theme-mirror'
 
 const SCENARIOS = [
@@ -138,14 +81,6 @@ const MODES = [
   },
 ]
 
-// ---------------------------------------------------------------- 探针（注入页面，必须在页面脚本之前跑）
-
-/**
- * 这个函数会被 Playwright 序列化后注入到**每个新文档**的文档开始处。
- * 注意两个坑：
- *   1. 注入时 `document.documentElement` 还是 null（实测），必须等它出现再挂 observer；
- *   2. 只在新标签页文档里安装，避免旁路解码页 / 别的 tab 白跑 8 秒 rAF。
- */
 function newtabBootProbe() {
   if (!location.pathname.includes('/dist/newtab'))
     return
@@ -234,7 +169,6 @@ function newtabBootProbe() {
         catch (e) {
           P.errors.push(`tick: ${String(e)}`)
         }
-        // 采样到 8s 足够覆盖淡入；同时避免页面关掉之后还在跑
         if (performance.now() < 8000)
           requestAnimationFrame(tick)
         else mark('samplingStopped')
@@ -259,15 +193,6 @@ function newtabBootProbe() {
   }
 }
 
-/**
- * Node 侧轮询用的采样函数。
- *
- * 为什么要另外轮询，而不是只靠探针里的 rAF：headless 下 rAF 是**跟着合成帧走**的
- * （实测页面静止时 rAF 650ms 不回调），而「浅色 token 停了多久」恰恰发生在静止期，
- * 所以 rAF 采样会漏掉最关键的窗口。Node 侧按固定间隔 evaluate 拿到的
- * `performance.now()` 是主线程真实执行时刻，静止期样本会稀疏甚至中断 ——
- * 这本身也是「主线程被占住」的证据，脚本会把最大间隔单独报出来。
- */
 function pollSample() {
   const cs = getComputedStyle(document.documentElement)
   const bodyStyle = document.body ? getComputedStyle(document.body) : null
@@ -295,7 +220,7 @@ function pollSample() {
   }
 }
 
-/** 采集：把探针数据拍平成可 JSON 化的结构（navigation 段只能在事后读） */function harvestProbe() {
+function harvestProbe() {
   const p = window.__bootProbe
   const r2 = v => Math.round(v * 100) / 100
   const out = p
@@ -348,8 +273,6 @@ function pollSample() {
   return out
 }
 
-// ---------------------------------------------------------------- 小工具
-
 const sha256 = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')
 function median(xs) {
   const a = xs.filter(v => typeof v === 'number' && Number.isFinite(v)).sort((p, q) => p - q)
@@ -366,7 +289,6 @@ function spread(xs) {
 }
 const rgbKey = rgb => rgb.join(',')
 
-/** 一次性解码一批 PNG 帧，只回传统计值（百万级数组不搬回来） */
 async function measureFrameBatch(reader, items, downsampleWidth) {
   return reader.evaluate(async ({ items: batch, DW }) => {
     const round4 = v => Math.round(v * 10000) / 10000
@@ -464,7 +386,6 @@ async function measureFrameBatch(reader, items, downsampleWidth) {
   }, { items, DW: downsampleWidth })
 }
 
-/** 时钟：Performance.getMetrics 的 Timestamp 是单调秒，借它把 CDP 单调时间换算成 epoch */
 async function clockOffset(cdp) {
   await cdp.send('Performance.enable').catch(() => {})
   const before = Date.now()
@@ -476,8 +397,6 @@ async function clockOffset(cdp) {
   const midSec = (before + after) / 2 / 1000
   return { offsetSec: midSec - mono, roundTripMs: after - before, monotonicSec: mono }
 }
-
-// ---------------------------------------------------------------- 派生指标
 
 function deriveRun(frames, probe) {
   const docFrames = frames.filter(f => f.relMs >= 0)
@@ -499,8 +418,6 @@ function deriveRun(frames, probe) {
   const firstNonBrightDoc = nonBrightDoc[0] ?? null
   const lastFrameRelMs = frames.length ? frames[frames.length - 1].relMs : null
 
-  // 「亮底表面」持续了多久（文档开始之后）。帧是变化驱动：两帧之间没有变化就没有帧，
-  // 所以「没有新帧」= 画面没变，这才是把首帧白算成 800ms 的原因。
   let docBrightSurfaceMs = 0
   if (brightDoc.length) {
     const start = Math.max(0, docFrames[0].relMs)
@@ -517,15 +434,12 @@ function deriveRun(frames, probe) {
   const htmlDarkMark = probe?.marks.find(m => m.name === 'htmlDark:true') ?? null
   const firstFinalLikeDoc = docFrames.find(f => f.finalLike) ?? null
 
-  // 「本页自己负责的白」= 从本页 first-paint 到亮底结束。
-  // 这比「从 timeOrigin 算」更公平：first-paint 之前浏览器画的是上一个文档的白，扩展管不着。
   let ownWhiteMs = null
   if (firstPaintMark) {
     const end = firstNonBrightDoc ? firstNonBrightDoc.relMs : (brightDoc.length ? lastFrameRelMs : null)
     ownWhiteMs = brightDoc.length ? Math.max(0, Math.round(end - firstPaintMark.t)) : 0
   }
 
-  // 连续同色段（按中心色量化），直接回答「闪了几帧、多长、什么颜色」
   const clusters = []
   for (const f of frames) {
     const key = rgbKey(f.centerRgb.map(v => Math.round(v / 8) * 8))
@@ -552,8 +466,6 @@ function deriveRun(frames, probe) {
   const cadence = []
   for (let i = 1; i < frames.length; i++) cadence.push(frames[i].relMs - frames[i - 1].relMs)
 
-  // 最长「画面完全没变」的间隔：帧是变化驱动的，所以相邻两帧之间就是一段静止画面。
-  // 这段是用户真正盯着不动的一屏，配合 colorBefore 就知道他盯的是什么颜色。
   let maxStaticGap = null
   for (let i = 1; i < frames.length; i++) {
     const ms = frames[i].relMs - frames[i - 1].relMs
@@ -569,9 +481,6 @@ function deriveRun(frames, probe) {
     }
   }
 
-  // ---- 与主题无关的判据：先看终态是亮底还是暗底，再把「和终态不同类」的帧算成闪动。
-  // 只靠「亮底帧」在浅色场景下会全盘失效（浅色本来就该是亮的），所以这条才是能横跨
-  // dark / light 两个场景的 headline。
   const finalIsBright = finalFrame ? finalFrame.mean > THRESHOLDS.brightLum : null
   const matchingDoc = docFrames.filter(f => f.bright === finalIsBright)
   const wrongThemeDoc = docFrames.filter(f => f.bright !== finalIsBright)
@@ -591,9 +500,6 @@ function deriveRun(frames, probe) {
     }
   }
 
-  // 每帧「在屏幕上停留多久」= 下一帧时间 − 本帧时间。
-  // 帧是变化驱动的，所以这个差值就是那张画面真实挂在屏幕上的时长 ——
-  // 「闪了几帧、多长、什么颜色」里的「多长」应该用这个，而不是「帧数 × 帧间隔」。
   for (let i = 0; i < frames.length; i++) {
     const next = frames[i + 1]
     frames[i].displayMs = next
@@ -654,22 +560,15 @@ function deriveRun(frames, probe) {
       maxStaticGap,
     },
     metrics: {
-      /** 文档开始后亮底表面持续多久（ms）—— 只对深色主题有意义；浅色主题本来就亮 */
       docBrightSurfaceMs,
-      /** 从本页 first-paint 到亮底结束（ms）—— 本页该背的锅（深色主题口径） */
       ownWhiteMs,
-      /** 与终态底色「同类」之前的时长（ms）—— 横跨 dark / light 两个场景的闪动指标 */
       wrongThemeSurfaceMs,
-      /** 同上，但从本页 first-paint 起算 —— 扣掉浏览器白之后本页该背的锅 */
       ownWrongThemeMs,
-      /** 从文档开始到「已经和终态同色」的第一帧（ms） */
       timeOriginToFinalLookMs: firstFinalLikeDoc ? firstFinalLikeDoc.relMs : null,
-      /** 第一帧暗底/非亮底出现的时间（ms） */
       firstNonBrightDocRelMs: firstNonBrightDoc ? firstNonBrightDoc.relMs : null,
       firstDocFrameRelMs: docFrames.length ? docFrames[0].relMs : null,
       firstDocFrameRgb: docFrames.length ? docFrames[0].centerRgb : null,
       firstDocFrameMean: docFrames.length ? docFrames[0].mean : null,
-      /** 首帧是不是浏览器纯白（255,255,255）—— 浅色场景要盯的就是这条 */
       firstDocFrameIsPureWhite: docFrames.length
         ? docFrames[0].mean >= THRESHOLDS.whiteLum && docFrames[0].centerRgb.every(v => v >= 250)
         : null,
@@ -694,8 +593,6 @@ function deriveRun(frames, probe) {
   }
 }
 
-// ---------------------------------------------------------------- 轮询时间线
-
 function derivePoll(rawSamples, probe) {
   if (!probe)
     return null
@@ -704,10 +601,6 @@ function derivePoll(rawSamples, probe) {
     return { sampleCount: 0, note: '轮询没采到 newtab 文档的样本（可能全都落在 about:blank 上）' }
   }
 
-  /**
-   * 只看「样式已经落地」的样本：文档刚建立时 --bg-base/--bg-deep 还是空串，
-   * 那不是「底色变了」，不能拿来当基准。
-   */
   const styled = doc.filter(s => typeof s.bgDeep === 'string' && /^rgba?\(|^#/.test(s.bgDeep))
   const first = doc[0]
   const last = doc[doc.length - 1]
@@ -720,8 +613,6 @@ function derivePoll(rawSamples, probe) {
       return null
     const at = Math.round(s.perfMs)
     const since = prevRel(s)
-    // 上两次采样之间隔了很久的话，真实变化时刻只能确定在 [since, at] 区间里；
-    // 「主线程被占住」时轮询根本进不去，这一点必须如实标出来。
     return { detectedAtRelMs: at, couldHaveHappenedSinceRelMs: since, uncertaintyMs: since == null ? null : at - since }
   }
 
@@ -783,24 +674,18 @@ function derivePoll(rawSamples, probe) {
   }
 }
 
-// ---------------------------------------------------------------- 单次运行
-
 async function runOnce(opts) {
   const { ctx, sw, extensionId, scenario, mode, repeat, reader, savedDir } = opts
   const runId = `${scenario.id}/${mode.id}#${repeat}`
   const newTabUrl = `chrome-extension://${extensionId}/dist/newtab/index.html`
   const runProblems = []
 
-  // 1) 写 storage。值和 scripts/preview.mjs 一样是**原始字符串**（string 序列化器不做 JSON.parse）
   await sw.evaluate(
     ([k, v]) => chrome.storage.local.set({ [k]: v }),
     ['meridiem-theme', scenario.theme],
   )
   const readback = await sw.evaluate(k => chrome.storage.local.get(k).then(d => d[k]), 'meridiem-theme')
 
-  // 1b) 种 localStorage 镜像。
-  // 必须用扩展自己的页面（chrome-extension:// 同源）来写；旁路解码页是 about:blank，写不到。
-  // 先等 options 应用挂载完（它自己也会写一次镜像），再写我们的值，避免被它覆盖。
   let mirrorSeed = null
   {
     const helper = await ctx.newPage()
@@ -829,7 +714,6 @@ async function runOnce(opts) {
     }
   }
 
-  // 2) 拿被追踪的页面
   let page
   let createAtEpochMs = null
   let armedTabId = null
@@ -844,7 +728,6 @@ async function runOnce(opts) {
     page = await pagePromise
   }
   else {
-    // tabs-armed：先建空白页把录屏挂稳，再让浏览器自己导航，这样提交之前的帧也在
     const pagePromise = ctx.waitForEvent('page', { timeout: 15000 })
     createAtEpochMs = Date.now()
     armedTabId = await sw.evaluate(() => chrome.tabs.create({ url: 'about:blank' }).then(t => t.id))
@@ -861,11 +744,10 @@ async function runOnce(opts) {
   page.on('requestfailed', (r) => {
     const url = r.url()
     if (url.includes('/_favicon/'))
-      return // 拿不到 favicon 是预期分支
+      return
     runErrors.push(`requestfailed: ${url} (${r.failure()?.errorText})`)
   })
 
-  // 3) 立刻挂 CDP 并开录屏（必须在导航前，否则抓不到白屏那几帧）
   const cdp = await ctx.newCDPSession(page)
   await cdp.send('Page.enable')
   const clock = await clockOffset(cdp)
@@ -912,7 +794,6 @@ async function runOnce(opts) {
   const attachEpochMs = Date.now()
   await page.bringToFront().catch(() => {})
 
-  // 3b) Node 侧固定间隔轮询主题 token 时间线（与导航并发，不 await）
   const pollSamples = []
   const pollDeadline = Date.now() + SETTLE_MS + 1500
   const pollLoop = (async () => {
@@ -921,18 +802,15 @@ async function runOnce(opts) {
         pollSamples.push(await page.evaluate(pollSample))
       }
       catch {
-        // 导航期间 execution context 会被销毁，属于预期；等下一次采样
       }
       await new Promise(r => setTimeout(r, 20))
     }
   })()
 
-  // 4) 导航
   if (mode.id === 'goto') {
     await page.goto(newTabUrl, { waitUntil: 'commit' })
   }
   else if (mode.id === 'tabs-armed') {
-    // 给合成器一点时间把「当前保留帧」（about:blank）发过来，这样 rel<0 那段也有帧
     await page.waitForTimeout(300)
     armedUpdate = await sw.evaluate(
       id => chrome.tabs.update(id, { url: 'chrome://newtab/' })
@@ -946,7 +824,6 @@ async function runOnce(opts) {
   await pollLoop.catch(() => {})
   await cdp.send('Page.stopScreencast').catch(() => {})
 
-  // 5) 探针 + 终态
   let probe = null
   try {
     probe = await page.evaluate(harvestProbe)
@@ -962,7 +839,6 @@ async function runOnce(opts) {
   if (!probe)
     runProblems.push('探针没装到页面上（window.__bootProbe 不存在），时间轴退化为帧时间戳')
 
-  // 6) 逐帧量像素：先降采样批量统计，再用 pixels.mjs 的 measureRects 做原分辨率交叉验证
   const stats = []
   const BATCH = 12
   for (let i = 0; i < rawFrames.length; i += BATCH) {
@@ -988,7 +864,6 @@ async function runOnce(opts) {
     h: stats[i].h,
   }))
 
-  // 交叉验证：取「第一帧亮底」和「最后一帧」两张原图，用 lib/pixels.mjs 的 measureRects 重量一遍
   const crossCheck = { checked: 0, maxChannelDelta: 0, detail: [] }
   const probeTargets = []
   const firstBright = frames.find(f => f.relMs >= 0 && f.mean > THRESHOLDS.brightLum)
@@ -1037,7 +912,6 @@ async function runOnce(opts) {
     derived.metrics.pollSampleCount = p.sampleCount ?? null
   }
 
-  // 覆盖度：CDP 挂上来的时刻 vs 文档开始时刻。tabs 模式天生看不到最前面那一段
   const attachRelMs = probe ? Math.round(attachEpochMs - probe.timeOrigin) : null
   const firstFrameRel = derived.frames.firstRelMs
   const observedFromRelMs = (attachRelMs == null || firstFrameRel == null)
@@ -1053,7 +927,6 @@ async function runOnce(opts) {
     + 'tabs 模式 attachRelMs 通常有 200~400ms：Playwright 先收到 page 事件、再建 CDP session，这段抓不到。',
   }
 
-  // 7) 关键帧落盘（肉眼复核）
   const savedFrames = []
   if (SAVE_FRAMES && frames.length) {
     const pick = new Set()
@@ -1086,7 +959,7 @@ async function runOnce(opts) {
     }
   }
 
-  rawFrames.length = 0 // 释放内存
+  rawFrames.length = 0
 
   const boundaryCandidates = lifecycle.filter(e => e.epochMs && probe && Math.abs(e.epochMs - probe.timeOrigin) < 1500)
   const commitEvent = lifecycle.find(e => e.name === 'commit' && e.epochMs && probe && e.epochMs >= probe.timeOrigin - 5)
@@ -1135,8 +1008,6 @@ async function runOnce(opts) {
     ackFailures,
   }
 }
-
-// ---------------------------------------------------------------- 聚合
 
 const AGG_METRICS = [
   'docBrightSurfaceMs',
@@ -1235,13 +1106,6 @@ function deltaVs(baseline, current) {
   return out
 }
 
-/**
- * 起一个加载了扩展的 persistent context，并**验证 newtab override 真的接管了**。
- *
- * 为什么要验证：headless + --load-extension 偶发加载失败（service worker 不注册，
- * chrome://newtab 落到浏览器默认 NTP）。那种情况下页面根本不是我们的产物，
- * 整批数字会静默变成「默认新标签页的白」—— 必须当场判死、重试，不能让它污染结果。
- */
 async function launchExtensionContext(scenario, attempt) {
   const ctx = await chromium.launchPersistentContext('', {
     headless: true,
@@ -1268,9 +1132,6 @@ async function launchExtensionContext(scenario, attempt) {
     if (!hasTabsApi)
       throw new Error('service worker 里没有 chrome.tabs（不是我们的扩展上下文）')
 
-    // 真实走一遍 override：chrome.tabs.create({}) 的落地文档 URL 必须是扩展的 newtab 页。
-    // 注意不能用 chrome.tabs.get().url 判断：Chrome 那边它可能是 chrome://newtab/（改写的请求 URL），
-    // 而真正落地的文档 URL 只有页面自己知道 —— 用 Playwright 的 page.url()。
     const pagePromise = ctx.waitForEvent('page', { timeout: 15000 })
     await sw.evaluate(() => chrome.tabs.create({}))
     const probePage = await pagePromise
@@ -1287,8 +1148,6 @@ async function launchExtensionContext(scenario, attempt) {
     throw e
   }
 }
-
-// ---------------------------------------------------------------- 主流程
 
 function loadHtmlEvidence() {
   const html = fs.readFileSync(NEWTAB_INDEX, 'utf8')
@@ -1313,7 +1172,6 @@ function loadHtmlEvidence() {
   const moduleScript = scriptTags.find(s => s.type === 'module' || (s.src && s.src.endsWith('.js') && !/theme-boot/.test(s.src))) ?? null
   const themeBootTag = scriptTags.find(s => s.src && /theme-boot/.test(s.src)) ?? null
 
-  // theme-boot.js 落盘位置：src 可能是 /dist/assets/theme-boot.js 或 ./theme-boot.js
   const themeBootPaths = []
   if (themeBootTag) {
     const rel = themeBootTag.src.replace(/^\.?\//, '')
@@ -1345,7 +1203,6 @@ function loadHtmlEvidence() {
     inlineStyleBytes: inlineCss.length,
     inlineBackgroundRuleCount: styleTags.filter(s => /background/i.test(s.css)).length,
     inlineHasDarkBackground: /html\.dark[^{]*\{[^}]*background/i.test(inlineCss) || /background-color:\s*#0/.test(inlineCss),
-    /** 内联样式必须排在 Vite 注入的样式表之前，第一帧才来得及用上 */
     inlineStyleBeforeFirstStylesheet: firstStyleIndex != null && stylesheetTags.length
       ? firstStyleIndex < Math.min(...stylesheetTags.map(s => s.index))
       : null,
@@ -1358,10 +1215,6 @@ function loadHtmlEvidence() {
   }
 }
 
-/**
- * lead 要求的 after 核对项：产物里有没有 boot 那两块、首帧是不是深色、dark 类是不是早于 first-paint。
- * baseline 里这些多半是 false —— 那正是要对照的「before」。
- */
 function bootCheck(payload) {
   const ext = payload.extension.newtabIndex
   const runs = payload.runs
@@ -1384,7 +1237,6 @@ function bootCheck(payload) {
       firstDocFrameRelMs: m.firstDocFrameRelMs,
       firstDocFrameRgb: m.firstDocFrameRgb,
       firstDocFrameIsPureWhite: m.firstDocFrameIsPureWhite,
-      /** 浅色场景要盯的：首帧底色应该是主题底色 #e8edf2 = 232,237,242，而不是浏览器纯白 255,255,255 */
       firstDocFrameMatchesLightToken: m.firstDocFrameRgb
         ? Math.max(...m.firstDocFrameRgb.map((v, i) => Math.abs(v - [232, 237, 242][i]))) <= 6
         : null,

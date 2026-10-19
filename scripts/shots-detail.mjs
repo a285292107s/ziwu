@@ -1,7 +1,3 @@
-/**
- * 局部放大截图，用于逐像素审视细节（磁贴、搜索框等）。
- * 用法：node --no-experimental-require-module scripts/shots-detail.mjs <round>
- */
 import fs from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
@@ -23,7 +19,6 @@ if (!sw)
   sw = await browser.waitForEvent('serviceworker')
 const extensionId = sw.url().split('/')[2]
 
-// deviceScaleFactor 2 → 细节看得清
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2 })
 await page.goto(`chrome-extension://${extensionId}/dist/newtab/index.html`)
 await page.waitForSelector('[data-test="shortcut-grid"]')
@@ -47,7 +42,6 @@ async function clipShot(selector, name, pad = 16) {
   console.log(`  saved ${name}.png  (${Math.round(box.width)}x${Math.round(box.height)} css px @2x)`)
 }
 
-// 快捷方式区块（含标题行 + 网格 + 新增）
 const section = page.locator('section[aria-labelledby="shortcuts-heading"]')
 const sbox = await section.boundingBox()
 await page.screenshot({
@@ -56,15 +50,10 @@ await page.screenshot({
 })
 console.log(`  saved shortcuts-region.png (section width ${Math.round(sbox.width)} css px)`)
 
-// 单个磁贴特写。注意磁贴的 data-test 是 `shortcut-tile-<id>`，
-// 而整理模式的四个小按钮是 `tile-edit-` / `tile-delete-` / `tile-left-` / `tile-right-`，
-// 所以这里必须写全 `shortcut-tile-`，不能用 `tile-` 前缀（那会先匹配到按钮上）。
 await clipShot('[data-test^="shortcut-tile-"]', 'tile-closeup')
 
-// 搜索框特写
 await clipShot('.search-shell', 'search-closeup')
 
-// 量：搜索框宽度 vs 网格宽度 vs 标题行宽度，检查对齐
 const metrics = await page.evaluate(() => {
   const q = s => document.querySelector(s)?.getBoundingClientRect()
   const grid = q('[data-test="shortcut-grid"]')

@@ -13,8 +13,6 @@ import type { Storage } from 'webextension-polyfill'
 
 export type WebExtensionStorageOptions<T> = UseStorageAsyncOptions<T>
 
-// 照搬 vueuse 的 guess.ts：序列化器的选择取决于初值的类型。
-// https://github.com/vueuse/vueuse/blob/658444bf9f8b96118dbd06eba411bb6639e24e88/packages/core/useStorage/guess.ts
 function guessSerializerType(rawInit: unknown) {
   return rawInit == null
     ? 'any'
@@ -35,27 +33,15 @@ function guessSerializerType(rawInit: unknown) {
                   : 'number'
 }
 
-/**
- * 键名迁移（一次性）：产品从 MyTab 改名成 子午 Meridiem，storage 键从 `mytab-*` 换成 `meridiem-*`。
- *
- * 搬迁放在**读路径**而不是启动流程里，是因为下面的 `writeDefaults` 默认开启：
- * 键不存在时 `read()` 会先写一遍默认值。任何「启动后异步迁移」都可能晚这一步，
- * 那时新键已经有默认值了，老数据就被顶掉。放在 getItem 里没有这个竞态：
- * 读到旧键 → 写新键 → 删旧键，两步之间失败也不丢数据（旧键还在）。
- *
- * 旧键全部搬完（已被删掉）之后这块就是空转，可以连同 `legacyKeyOf` 一起删掉。
- */
 const STORAGE_PREFIX = 'meridiem-'
 const LEGACY_STORAGE_PREFIX = 'mytab-'
 
-/** `meridiem-shortcuts` → `mytab-shortcuts`；不是本产品的键返回 null */
 function legacyKeyOf(key: string) {
   return key.startsWith(STORAGE_PREFIX)
     ? `${LEGACY_STORAGE_PREFIX}${key.slice(STORAGE_PREFIX.length)}`
     : null
 }
 
-/** 读一个键的原始值（storage.local 里存的就是序列化后的字符串）；键不存在时返回 null */
 async function readRaw(key: string) {
   const stored = await storage.local.get(key)
 
@@ -76,7 +62,6 @@ const storageInterface: StorageLikeAsync = {
     if (current != null)
       return current
 
-    // 新键还没有值：看看改名前的旧键里有没有，有就搬过来
     const legacyKey = legacyKeyOf(key)
     if (legacyKey) {
       const legacy = await readRaw(legacyKey)
@@ -86,9 +71,6 @@ const storageInterface: StorageLikeAsync = {
         return legacy
       }
 
-      /* 兜底：新标签页和设置页可能同时首读。另一个页面若刚搬完并删掉旧键，
-         而我读旧键时它已经没了 —— 不复查就会当成「没有值」写回默认值，
-         把刚搬过去的数据顶掉。旧键先写后删，所以这里必然已有新键。 */
       return await readRaw(key)
     }
 
@@ -96,13 +78,6 @@ const storageInterface: StorageLikeAsync = {
   },
 }
 
-/**
- * https://github.com/vueuse/vueuse/blob/658444bf9f8b96118dbd06eba411bb6639e24e88/packages/core/useStorageAsync/index.ts
- *
- * @param key
- * @param initialValue
- * @param options
- */
 export function useWebExtensionStorage<T>(
   key: string,
   initialValue: MaybeRefOrGetter<T>,

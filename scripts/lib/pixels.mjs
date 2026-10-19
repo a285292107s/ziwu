@@ -1,33 +1,9 @@
-/**
- * 截图取像素的小工具（开发用，不属于测试套件）。
- *
- * Playwright 只能给出 PNG 字节，Node 侧没有解码器；但浏览器里有。
- * 所以开一个 about:blank 的旁路页面，把 PNG 用 data URL 塞进去，
- * 画到 2D canvas 上再 getImageData —— 这样拿到的是**真正合成后的像素**，
- * 包含 WebGL 天空、CSS 薄膜、暗角、玻璃模糊，也就是用户眼睛看到的那一层。
- *
- * 这一点很关键：contrast-audit.mjs 只能读 computed style，看不见 canvas。
- * 天空背景的对比度必须从像素上量。
- *
- * 注意：**统计必须在页面里算完再回传**。一张 2880×1800 的图有 2000 万个分量，
- * 塞进 evaluate 的返回值里会大到传不回来（表现为统计恒为 0）。
- */
-
-/** 旁路页面：只用来解码 PNG，不进扩展上下文 */
 export async function openPixelReader(browser) {
   const page = await browser.newPage()
   await page.goto('about:blank')
   return page
 }
 
-/**
- * 一次解码，量多块矩形。
- * @param reader openPixelReader() 的返回值
- * @param buffer PNG 字节
- * @param rects  { [名字]: {x,y,w,h} } —— CSS 像素
- * @param ratio  deviceScaleFactor
- * @returns { [名字]: {mean,min,max,p10,p90,rgb} } —— 线性亮度与平均 RGB，按名字索引
- */
 export async function measureRects(reader, buffer, rects, ratio = 1) {
   return reader.evaluate(async ({ dataUrl, rects, ratio }) => {
     const img = new Image()
@@ -86,12 +62,10 @@ export async function measureRects(reader, buffer, rects, ratio = 1) {
 
 const linearize = v => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4)
 
-/** WCAG 相对亮度（RGB 0-255） */
 export function luminance(r, g, b) {
   return 0.2126 * linearize(r / 255) + 0.7152 * linearize(g / 255) + 0.0722 * linearize(b / 255)
 }
 
-/** WCAG 对比度 */
 export function contrast(l1, l2) {
   const hi = Math.max(l1, l2)
   const lo = Math.min(l1, l2)
